@@ -1,6 +1,6 @@
 """Reglas de validación y métricas del pipeline."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -19,6 +19,7 @@ class ProcessingSummary:
     discarded_records: int = 0
     duplicate_records: int = 0
     missing_values: int = 0
+    dataset_errors: list[dict[str, str]] = field(default_factory=list)
 
 
 def valid_latitude(value: float) -> bool:

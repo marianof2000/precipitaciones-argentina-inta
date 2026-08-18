@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from precipitaciones_argentina.visualization import (
+    anomaly_rgba,
     build_compact_temporal_payload,
     generate_map,
     precipitation_rgba,
@@ -34,6 +35,21 @@ def test_precipitation_raster_is_transparent_outside_mask():
     )
     assert rgba[0, 0, 3] == 0
     assert rgba[0, 1, 3] > 0
+
+
+def test_same_precipitation_always_has_same_color():
+    values = np.array([[137.0], [137.0]])
+    rgba = precipitation_rgba(values, np.ones_like(values, dtype=bool), maximum=500)
+    assert np.array_equal(rgba[0], rgba[1])
+
+
+def test_anomaly_scale_is_diverging_and_transparent_for_missing_cells():
+    values = np.array([[-100.0, 0.0, 100.0, np.nan]])
+    rgba = anomaly_rgba(values, np.array([[True, True, True, False]]), limit=100)
+    assert rgba[0, 0, 2] == 255
+    assert rgba[0, 1, :3].tolist() == [255, 255, 255]
+    assert rgba[0, 2, 0] == 255
+    assert rgba[0, 3, 3] == 0
 
 
 def test_generate_static_map(tmp_path):

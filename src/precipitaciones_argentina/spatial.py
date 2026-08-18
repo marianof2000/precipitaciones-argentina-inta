@@ -43,6 +43,15 @@ class InterpolationResult:
     station_count: int
 
 
+@dataclass(frozen=True)
+class CrossValidationResult:
+    """Métricas de validación leave-one-station-out."""
+
+    mae: float
+    rmse: float
+    sample_count: int
+
+
 def load_territory(path: Path, target_crs: str = "EPSG:4326") -> BaseGeometry:
     """Carga el territorio continental e insular próximo apto para interpolación.
 
@@ -142,3 +151,60 @@ def idw_interpolation(
     valid_mask = np.zeros(flat.shape, dtype=bool)
     valid_mask[spatial_mask] = True
     return InterpolationResult(flat.reshape(shape), valid_mask.reshape(shape), len(unique_points))
+
+
+def interpolate(
+    method: str,
+    station_longitudes: np.ndarray,
+    station_latitudes: np.ndarray,
+    values: np.ndarray,
+    grid: SpatialGrid,
+    **parameters: float | int,
+) -> InterpolationResult:
+    """Despacha el método espacial sin ocultar algoritmos aún no implementados."""
+    if method.casefold() == "idw":
+        return idw_interpolation(
+            station_longitudes, station_latitudes, values, grid, **parameters
+        )
+    raise NotImplementedError(
+        f"Método de interpolación no implementado: {method}. "
+        "Los candidatos previstos son RBF y Kriging."
+    )
+
+
+def cross_validate_idw(
+    longitudes: np.ndarray,
+    latitudes: np.ndarray,
+    values: np.ndarray,
+    power: float = 2.0,
+) -> CrossValidationResult:
+    """Evalúa IDW retirando sucesivamente cada observación válida."""
+    finite = np.isfinite(longitudes) & np.isfinite(latitudes) & np.isfinite(values)
+    points = np.column_stack((longitudes[finite], latitudes[finite]))
+    observations = values[finite].astype(float)
+    estimates: list[float] = []
+    actual: list[float] = []
+    for index, point in enumerate(points):
+        remaining = np.arange(len(points)) != index
+        if remaining.sum() < 2:
+            continue
+        distances = np.hypot(
+            points[remaining, 0] - point[0], points[remaining, 1] - point[1]
+        )
+        remaining_values = observations[remaining]
+        exact = distances <= 1e-12
+        if exact.any():
+            estimate = float(remaining_values[exact].mean())
+        else:
+            weights = 1 / np.power(distances, power)
+            estimate = float(np.average(remaining_values, weights=weights))
+        estimates.append(estimate)
+        actual.append(float(observations[index]))
+    if not estimates:
+        return CrossValidationResult(float("nan"), float("nan"), 0)
+    errors = np.asarray(estimates) - np.asarray(actual)
+    return CrossValidationResult(
+        mae=float(np.abs(errors).mean()),
+        rmse=float(np.sqrt(np.square(errors).mean())),
+        sample_count=len(errors),
+    )

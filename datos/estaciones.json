@@ -11,10 +11,10 @@
   },
   "fuente": "https://siga.inta.gob.ar/CdnaUV0iiERRpFQE.php?param_type=estacion&param_value=",
   "generado_en": "2026-08-18T18:49:17+00:00",
-  "cantidad_estaciones": 182,
+  "cantidad_estaciones": 181,
   "resumen_descargas": {
     "existente": 181,
-    "error": 1
+    "error": 0
   },
   "estaciones": [
     {
@@ -1561,35 +1561,6 @@
         "sha256": "aa7d33ffb2504049399b62bdb0196fad6c7e54bbf9b220bbc6dd7e63e14088e1",
         "descargado_en": "2026-08-18T18:49:10+00:00",
         "http": {}
-      }
-    },
-    {
-      "id_estacion": "NH0145",
-      "metadata_origen": {
-        "altura": 65.0,
-        "descripcion": "Pergamino EEA INTA",
-        "id": 37,
-        "idInterno": "NH0145",
-        "idTipo": 1,
-        "latitud": -33.93,
-        "localidad": "Pergamino",
-        "longitud": -60.55,
-        "maximoDiario": "2022-01-12T00:00:00Z[UTC]",
-        "minimoDiario": "1931-01-01T00:00:00Z[UTC]",
-        "nombre": "INTA - Pergamino (EMC)",
-        "provincia": "Buenos Aires",
-        "tipo": "Convencional Instr. Completo",
-        "ubicacion": "Ruta 32 Km.4,5 - B2700WAA",
-        "ultimoRegistro": "2022-01-12T00:00:00Z[UTC]",
-        "visible": true
-      },
-      "descarga": {
-        "estado": "error",
-        "archivo": "datos/NH0145.xls",
-        "url": "https://siga.inta.gob.ar/document/series/NH0145.xls",
-        "error": "HTTP Error 404: Not Found",
-        "intentos": 3,
-        "descargado_en": "2026-08-18T18:49:16+00:00"
       }
     },
     {

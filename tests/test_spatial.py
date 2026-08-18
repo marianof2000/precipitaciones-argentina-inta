@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from shapely.geometry import box
 
 from precipitaciones_argentina.coverage import (
@@ -10,7 +11,9 @@ from precipitaciones_argentina.coverage import (
 )
 from precipitaciones_argentina.spatial import (
     create_spatial_grid,
+    cross_validate_idw,
     idw_interpolation,
+    interpolate,
     load_territory,
 )
 from precipitaciones_argentina.statistics import (
@@ -67,6 +70,14 @@ def test_idw_requires_enough_non_collinear_stations():
     assert not result.valid_mask.any()
 
 
+def test_interpolation_dispatcher_rejects_unimplemented_methods():
+    grid = create_spatial_grid(box(0, 0, 2, 2), 1)
+    with pytest.raises(NotImplementedError, match="Kriging"):
+        interpolate(
+            "kriging", np.array([0.0]), np.array([0.0]), np.array([1.0]), grid
+        )
+
+
 def test_coverage_metrics():
     stations = np.array([[0.0, 0.0], [2.0, 0.0]])
     targets = np.array([[1.0, 0.0]])
@@ -77,3 +88,13 @@ def test_coverage_metrics():
 def test_interpolation_territory_excludes_antarctica():
     path = Path(__file__).parents[1] / "assets" / "argentina_provincias.geojson"
     assert load_territory(path).bounds[1] > -56
+
+
+def test_idw_leave_one_out_metrics_are_finite():
+    result = cross_validate_idw(
+        np.array([0.0, 1.0, 0.0]),
+        np.array([0.0, 0.0, 1.0]),
+        np.array([10.0, 20.0, 30.0]),
+    )
+    assert result.sample_count == 3
+    assert np.isfinite(result.mae) and np.isfinite(result.rmse)
