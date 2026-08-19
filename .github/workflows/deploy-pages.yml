@@ -1,0 +1,69 @@
+name: Publicar mapa en GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v6
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Instalar Python
+        run: uv python install 3.14
+
+      - name: Instalar dependencias
+        run: uv sync --locked
+
+      - name: Ejecutar pruebas
+        run: uv run pytest
+
+      - name: Verificar código
+        run: uv run ruff check .
+
+      - name: Generar sitio
+        run: uv run precipitaciones
+
+      - name: Evitar procesamiento Jekyll
+        run: touch output/.nojekyll
+
+      - name: Configurar Pages
+        uses: actions/configure-pages@v5
+
+      - name: Subir sitio generado
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: output
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Publicar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
