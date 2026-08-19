@@ -176,7 +176,8 @@ def test_generate_static_map(tmp_path):
     assert "Precipitación acumulada trimestral — Año:" in html
     assert "chartGrid" in html
     assert "stroke=\"#d7dce0\"" in html
-    assert "width: 370px" in html
+    assert "#legend-panel[open]" in html
+    assert '<details id="legend-panel" class="precip-panel" open>' in html
     assert "localeCompare(b.station.e,'es'" in html
     assert "idw-opaque-checkbox" in html
     assert "let idwOpaque = idwOpaqueCheckbox.checked" in html

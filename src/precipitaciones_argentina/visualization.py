@@ -558,7 +558,10 @@ def _controls_html(maximum: float, audit: dict[str, object] | None = None) -> st
       #stats-panel {{ right: 12px; top: 150px; width: 245px; padding: 12px; }}
       #stats-panel h4 {{ margin:0 0 7px; font-size:15px; }}
       #stats-grid {{ display:grid; grid-template-columns:1fr auto; gap:3px 10px; }}
-      #legend-panel {{ left: 12px; bottom: 24px; width: 370px; padding:10px; }}
+      #legend-panel {{ left:12px; bottom:24px; padding:10px; }}
+      #legend-panel[open] {{ width:370px; }}
+      #legend-panel:not([open]) {{ width:auto; }}
+      #legend-panel summary {{ cursor:pointer; user-select:none; white-space:nowrap; }}
       #update-panel {{ left: 52px; top: 12px; padding:8px 11px; }}
       #analysis-panel {{ left:52px; top:108px; width:310px; padding:9px; }}
       #analysis-panel select {{ width:100%; margin:2px 0 5px; }}
@@ -608,10 +611,12 @@ def _controls_html(maximum: float, audit: dict[str, object] | None = None) -> st
       <svg id="series-chart" viewBox="0 0 300 130" preserveAspectRatio="none"></svg>
       <div id="series-summary"></div>
     </details>
-    <div id="legend-panel" class="precip-panel"><strong id="legend-title">Precipitación acumulada trimestral (mm)</strong>
+    <details id="legend-panel" class="precip-panel" open>
+      <summary><strong id="legend-title">Precipitación acumulada trimestral (mm)</strong></summary>
       <div id="legend-gradient"></div><div id="legend-values">0 · {maximum:g} mm</div>
       <small id="legend-note">Color: escala logarítmica · valores expresados en mm</small><br>
-      <small>● observado &nbsp; ≠ estimación espacial</small></div>
+      <small>● observado &nbsp; ≠ estimación espacial</small>
+    </details>
     """
 
 
