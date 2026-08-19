@@ -17,6 +17,7 @@ from shapely.geometry import Point
 from . import __version__, config
 from .spatial import load_territory
 from .statistics import generate_precipitation_ticks, precipitation_global_maximum
+from .temporal import ACCUMULATED_COLUMN, ensure_quarterly_canonical_columns
 from .validation import ProcessingSummary
 
 LOGGER = logging.getLogger(__name__)
@@ -105,6 +106,7 @@ def build_traceability_samples(
     daily: pd.DataFrame, quarterly: pd.DataFrame, sample_count: int = 5
 ) -> list[dict[str, Any]]:
     """Selecciona casos distribuidos y prueba el encadenamiento hasta el valor del mapa."""
+    quarterly = ensure_quarterly_canonical_columns(quarterly)
     dataset_ids = sorted(daily["dataset_id"].unique())
     if not dataset_ids:
         return []
@@ -125,7 +127,7 @@ def build_traceability_samples(
             & quarterly["periodo"].eq(original["periodo"])
         ].iloc[0]
         calculated = float(period_rows["precipitacion_mm"].sum(min_count=1))
-        displayed = float(map_row["precipitacion_mm"])
+        displayed = float(map_row[ACCUMULATED_COLUMN])
         samples.append(
             {
                 "dataset_id": dataset_id,
@@ -172,6 +174,7 @@ def create_audit_report(
     output_path: Path = config.OUTPUT_AUDIT,
 ) -> dict[str, Any]:
     """Construye y escribe el informe de auditoría de la ejecución actual."""
+    quarterly = ensure_quarterly_canonical_columns(quarterly)
     generation_time = datetime.now(TIMEZONE)
     periods = sorted(
         quarterly["periodo"].unique(),
@@ -203,10 +206,10 @@ def create_audit_report(
         "fecha_maxima": daily["fecha"].max().isoformat(),
         "periodo_minimo": periods[0],
         "periodo_maximo": periods[-1],
-        "precipitacion_minima_mm": float(quarterly["precipitacion_mm"].min()),
+        "precipitacion_minima_mm": float(quarterly[ACCUMULATED_COLUMN].min()),
         "precipitacion_maxima_mm": maximum,
-        "precipitacion_media_mm": float(quarterly["precipitacion_mm"].mean()),
-        "precipitacion_mediana_mm": float(quarterly["precipitacion_mm"].median()),
+        "precipitacion_media_mm": float(quarterly[ACCUMULATED_COLUMN].mean()),
+        "precipitacion_mediana_mm": float(quarterly[ACCUMULATED_COLUMN].median()),
         "precipitaciones_negativas": int(daily["precipitacion_mm"].lt(0).sum()),
         "faltantes_reemplazados_por_cero": 0,
         "crs_visualizacion": config.TARGET_CRS,

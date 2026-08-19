@@ -28,6 +28,7 @@ class DatasetConfig:
     unidad_precipitacion: str = "mm"
     campos: dict[str, str] = field(default_factory=dict)
     preferir_coordenadas_catalogo: bool = True
+    tipo_precipitacion: str = "incremental"
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -35,6 +36,13 @@ def _required(mapping: dict[str, Any], key: str, context: str) -> Any:
     value = mapping.get(key)
     if value is None or value == "":
         raise CatalogError(f"Falta '{key}' en {context}")
+    return value
+
+
+def _precipitation_type(mapping: dict[str, Any]) -> str:
+    value = str(mapping.get("tipo_precipitacion", "incremental"))
+    if value not in {"incremental", "acumulada"}:
+        raise CatalogError("tipo_precipitacion debe ser 'incremental' o 'acumulada'")
     return value
 
 
@@ -55,6 +63,7 @@ def _from_inta(entry: dict[str, Any], defaults: dict[str, Any]) -> DatasetConfig
         longitud=float(_required(metadata, "longitud", "metadata_origen")),
         hoja=defaults.get("hoja", 0),
         unidad_precipitacion=str(defaults.get("unidad_precipitacion", "mm")),
+        tipo_precipitacion=_precipitation_type({**defaults, **entry}),
         campos=dict(fields),
         preferir_coordenadas_catalogo=bool(
             defaults.get("preferir_coordenadas_catalogo", True)
@@ -70,7 +79,7 @@ def _from_generic(entry: dict[str, Any], defaults: dict[str, Any]) -> DatasetCon
         raise CatalogError("campos debe declarar fecha y precipitacion")
     known = {
         "id", "archivo", "fuente", "estacion", "localidad", "provincia", "latitud",
-        "longitud", "hoja", "unidad_precipitacion", "campos",
+        "longitud", "hoja", "unidad_precipitacion", "tipo_precipitacion", "campos",
         "preferir_coordenadas_catalogo",
     }
     return DatasetConfig(
@@ -84,6 +93,7 @@ def _from_generic(entry: dict[str, Any], defaults: dict[str, Any]) -> DatasetCon
         longitud=float(_required(merged, "longitud", "dataset")),
         hoja=merged.get("hoja", 0),
         unidad_precipitacion=str(merged.get("unidad_precipitacion", "mm")),
+        tipo_precipitacion=_precipitation_type(merged),
         campos=dict(fields),
         preferir_coordenadas_catalogo=bool(
             merged.get("preferir_coordenadas_catalogo", True)
@@ -108,4 +118,3 @@ def load_catalog(path: Path) -> list[DatasetConfig]:
     if len(identifiers) != len(set(identifiers)):
         raise CatalogError("El catálogo contiene identificadores duplicados")
     return datasets
-

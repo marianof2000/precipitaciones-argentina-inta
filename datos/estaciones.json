@@ -3,6 +3,7 @@
     "fuente_nombre": "INTA - Sistema de Información y Gestión Agrometeorológica",
     "hoja": "Datos diarios",
     "unidad_precipitacion": "mm",
+    "tipo_precipitacion": "incremental",
     "campos": {
       "fecha": "Fecha",
       "precipitacion": "Precipitacion_Pluviometrica"

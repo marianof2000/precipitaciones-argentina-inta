@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 from pathlib import Path
 
 import folium
@@ -18,15 +19,34 @@ import pandas as pd
 from branca.element import Element, MacroElement, Template
 from folium.plugins import HeatMap
 from PIL import Image
+from shapely import intersects_xy
 
 from . import config
 from .coverage import nearest_station_distance_km, stations_within_radius
-from .spatial import SpatialGrid, create_spatial_grid, interpolate, load_territory
-from .statistics import (
-    generate_precipitation_ticks,
-    precipitation_global_maximum,
+from .spatial import (
+    InterpolationResult,
+    SpatialGrid,
+    active_stations,
+    create_spatial_grid,
+    idw_at_points,
+    interpolate,
+    load_territory,
+    raster_pixel_for_coordinate,
+    validate_active_station_coverage,
 )
-from .temporal import add_climate_anomalies
+from .statistics import (
+    generate_log_legend_ticks,
+    generate_precipitation_ticks,
+    normalize_precipitation_for_color,
+    precipitation_global_maximum,
+    thin_legend_ticks,
+)
+from .temporal import (
+    ACCUMULATED_COLUMN,
+    MEAN_COLUMN,
+    add_climate_anomalies,
+    ensure_quarterly_canonical_columns,
+)
 
 COLOR_STOPS = [
     (0.0, "#ffffd9"),
@@ -36,6 +56,7 @@ COLOR_STOPS = [
     (0.8, "#225ea8"),
     (1.0, "#081d58"),
 ]
+LOGGER = logging.getLogger(__name__)
 
 
 class _DeferredScript(MacroElement):
@@ -53,9 +74,12 @@ def _period_key(period: str) -> tuple[int, int]:
 
 def build_compact_temporal_payload(frame: pd.DataFrame) -> dict[str, object]:
     """Deduplica metadatos de estaciones para reducir el HTML sin perder campos."""
+    frame = ensure_quarterly_canonical_columns(frame)
+    if "tipo_precipitacion" not in frame:
+        frame = frame.assign(tipo_precipitacion="incremental")
     station_fields = [
         "dataset_id", "archivo_origen", "fuente", "estacion", "localidad", "provincia",
-        "latitud", "longitud", "unidad_original",
+        "latitud", "longitud", "unidad_original", "tipo_precipitacion",
     ]
     stations = frame.drop_duplicates("dataset_id")[station_fields].reset_index(drop=True)
     station_index = {dataset_id: index for index, dataset_id in enumerate(stations["dataset_id"])}
@@ -70,6 +94,7 @@ def build_compact_temporal_payload(frame: pd.DataFrame) -> dict[str, object]:
             "y": round(float(row.latitud), 6),
             "x": round(float(row.longitud), 6),
             "u": row.unidad_original,
+            "t": row.tipo_precipitacion,
         }
         for row in stations.itertuples(index=False)
     ]
@@ -83,12 +108,16 @@ def build_compact_temporal_payload(frame: pd.DataFrame) -> dict[str, object]:
             [
                 station_index[row.dataset_id],
                 round(float(row.precipitacion_original), 6),
-                round(float(row.precipitacion_mm), 6),
+                round(float(getattr(row, ACCUMULATED_COLUMN)), 6),
                 int(row.cantidad_observaciones),
                 optional_number(getattr(row, "precipitacion_historica_mm", None)),
                 optional_number(getattr(row, "anomalia_absoluta_mm", None)),
                 optional_number(getattr(row, "anomalia_relativa_pct", None)),
                 optional_number(getattr(row, "anios_historicos", None)),
+                optional_number(getattr(row, MEAN_COLUMN, None)),
+                optional_number(getattr(row, "precipitacion_minima_mm", None)),
+                optional_number(getattr(row, "precipitacion_maxima_mm", None)),
+                optional_number(getattr(row, ACCUMULATED_COLUMN, None)),
             ]
             for row in rows.itertuples(index=False)
         ]
@@ -103,10 +132,22 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
 
 
 def precipitation_rgba(
-    values: np.ndarray, valid_mask: np.ndarray, maximum: float, alpha: int = 175
+    values: np.ndarray,
+    valid_mask: np.ndarray,
+    maximum: float,
+    alpha: int = 255,
+    scale: str = "linear",
 ) -> np.ndarray:
     """Aplica la misma escala continua global del mapa y transparencia fuera de cobertura."""
-    ratio = np.clip(values / maximum, 0, 1) if maximum > 0 else np.zeros_like(values)
+    if scale not in {"linear", "log"}:
+        raise ValueError("scale debe ser 'linear' o 'log'")
+    bounded = np.clip(values, 0, maximum) if maximum > 0 else np.zeros_like(values)
+    if maximum <= 0:
+        ratio = np.zeros_like(values)
+    elif scale == "log":
+        ratio = np.log1p(bounded) / np.log1p(maximum)
+    else:
+        ratio = bounded / maximum
     result = np.zeros((*values.shape, 4), dtype=np.uint8)
     for (start, start_color), (end, end_color) in zip(
         COLOR_STOPS, COLOR_STOPS[1:], strict=False
@@ -121,13 +162,34 @@ def precipitation_rgba(
         first = np.asarray(_hex_to_rgb(start_color))
         last = np.asarray(_hex_to_rgb(end_color))
         colors = first + fraction[..., None] * (last - first)
-        result[selection, :3] = colors[selection].astype(np.uint8)
+        # Math.round de JavaScript para canales no negativos: floor(x + 0.5).
+        result[selection, :3] = np.floor(colors[selection] + 0.5).astype(np.uint8)
     result[valid_mask, 3] = alpha
     return result
 
 
+def precipitation_to_rgba(
+    value_mm: float,
+    *,
+    maximum_mm: float,
+    scale: str,
+    alpha: float = 1.0,
+) -> tuple[int, int, int, int]:
+    """Convierte un valor real con la misma ruta cromática usada por el ráster."""
+    if not 0 <= alpha <= 1:
+        raise ValueError("alpha debe estar entre 0 y 1")
+    rgba = precipitation_rgba(
+        np.array([[value_mm]], dtype=float),
+        np.array([[True]]),
+        maximum_mm,
+        alpha=round(alpha * 255),
+        scale=scale,
+    )
+    return tuple(int(channel) for channel in rgba[0, 0])
+
+
 def anomaly_rgba(
-    values: np.ndarray, valid_mask: np.ndarray, limit: float, alpha: int = 175
+    values: np.ndarray, valid_mask: np.ndarray, limit: float, alpha: int = 255
 ) -> np.ndarray:
     """Aplica escala divergente azul-blanco-rojo centrada exactamente en cero."""
     if limit <= 0:
@@ -174,12 +236,103 @@ def coverage_rgba(
     return rgba, metrics
 
 
+def orient_rgba_for_leaflet(rgba: np.ndarray) -> np.ndarray:
+    """Orienta norte arriba; conserva oeste a la izquierda."""
+    return np.flipud(rgba)
+
+
 def _rgba_data_url(rgba: np.ndarray) -> str:
     """Codifica un ráster RGBA como PNG embebible."""
     buffer = io.BytesIO()
-    Image.fromarray(np.flipud(rgba), mode="RGBA").save(buffer, format="PNG", optimize=True)
+    Image.fromarray(orient_rgba_for_leaflet(rgba), mode="RGBA").save(
+        buffer, format="PNG", optimize=True
+    )
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def _write_spatial_debug(
+    period: str, grid: SpatialGrid, result: InterpolationResult, rgba: np.ndarray
+) -> None:
+    """Escribe matrices diagnósticas sólo cuando SPATIAL_DEBUG está habilitado."""
+    debug_directory = config.OUTPUT_DIR / "debug"
+    debug_directory.mkdir(parents=True, exist_ok=True)
+    final_rgba = orient_rgba_for_leaflet(rgba)
+    mask = (final_rgba[..., 3] > 0).astype(np.uint8) * 255
+    Image.fromarray(mask, mode="L").save(debug_directory / f"mask_{period}.png")
+    Image.fromarray(final_rgba[..., 3], mode="L").save(
+        debug_directory / f"alpha_{period}.png"
+    )
+    Image.fromarray(final_rgba, mode="RGBA").save(
+        debug_directory / f"rgba_{period}.png"
+    )
+    values = np.flipud(result.values)
+    finite = np.isfinite(values)
+    grayscale = np.zeros(values.shape, dtype=np.uint8)
+    if finite.any():
+        minimum, maximum = values[finite].min(), values[finite].max()
+        if maximum > minimum:
+            normalized = (values[finite] - minimum) / (maximum - minimum)
+            grayscale[finite] = (normalized * 255).astype(np.uint8)
+    Image.fromarray(grayscale, mode="L").save(debug_directory / f"idw_{period}.png")
+
+
+def _write_alignment_debug(
+    period: str, grid: SpatialGrid, stations: pd.DataFrame
+) -> None:
+    """Genera un ráster sin IDW y su tabla de alineación estación-píxel."""
+    debug_directory = config.OUTPUT_DIR / "debug"
+    debug_directory.mkdir(parents=True, exist_ok=True)
+    alignment = np.zeros(
+        (len(grid.latitudes), len(grid.longitudes), 4), dtype=np.uint8
+    )
+    patterns = ["Pergamino", "Chascom"]
+    colors = [(255, 0, 0, 255), (0, 170, 0, 255), (0, 0, 255, 255)]
+    selected: list[pd.Series] = []
+    for pattern in patterns:
+        matches = stations.loc[
+            stations["estacion"].str.contains(pattern, case=False, regex=True, na=False)
+        ]
+        if not matches.empty:
+            selected.append(matches.iloc[0])
+    # El período de control no posee una estación denominada Bahía Blanca.
+    # Se usa la estación activa más cercana a esa ciudad como equivalente austral.
+    bahia_latitude, bahia_longitude = -38.72, -62.27
+    if not stations.empty:
+        latitude_delta = stations["latitud"].astype(float) - bahia_latitude
+        longitude_delta = (
+            (stations["longitud"].astype(float) - bahia_longitude)
+            * np.cos(np.deg2rad(bahia_latitude))
+        )
+        selected.append(stations.loc[(latitude_delta**2 + longitude_delta**2).idxmin()])
+    records: list[dict[str, object]] = []
+    for station, color in zip(selected, colors, strict=False):
+        pixel = raster_pixel_for_coordinate(
+            grid, float(station["longitud"]), float(station["latitud"])
+        )
+        alignment[pixel.row, pixel.column] = color
+        records.append({
+            "station": station["estacion"],
+            "real_lat": station["latitud"], "real_lon": station["longitud"],
+            "row": pixel.row, "column": pixel.column,
+            "pixel_lat": pixel.center_latitude,
+            "pixel_lon": pixel.center_longitude,
+            "delta_lat": pixel.center_latitude - float(station["latitud"]),
+            "delta_lon": pixel.center_longitude - float(station["longitud"]),
+        })
+    Image.fromarray(alignment, mode="RGBA").save(
+        debug_directory / "raster_alignment.png"
+    )
+    pd.DataFrame(records).to_csv(
+        debug_directory / "raster_alignment_points.csv", index=False
+    )
+    LOGGER.info(
+        "=== RASTER GEOREFERENCE === resolución=%s shape=%s "
+        "latitudes=south_to_north Leaflet=north_to_south flipud=YES "
+        "bounds=%s row0_lat=%.6f last_row_lat=%.6f",
+        config.GRID_RESOLUTION, alignment.shape[:2], grid.bounds,
+        grid.latitudes[-1], grid.latitudes[0],
+    )
 
 
 def build_interpolation_payload(
@@ -190,12 +343,12 @@ def build_interpolation_payload(
     relative_limit: float,
 ) -> dict[str, dict[str, dict[str, object]]]:
     """Precalcula superficies IDW para precipitación y anomalías por período."""
+    frame = ensure_quarterly_canonical_columns(frame)
     payload: dict[str, dict[str, dict[str, object]]] = {}
     for period, rows in frame.groupby("periodo", sort=False):
-        rows = rows.loc[rows["provincia"].str.casefold().ne("sin asignar")]
         period_payload: dict[str, dict[str, object]] = {}
         modes = {
-            "absolute": ("precipitacion_mm", maximum, precipitation_rgba),
+            "absolute": (ACCUMULATED_COLUMN, maximum, precipitation_rgba),
             "anomaly_abs": ("anomalia_absoluta_mm", anomaly_maximum, anomaly_rgba),
             "anomaly_rel": (
                 "anomalia_relativa_pct",
@@ -203,30 +356,179 @@ def build_interpolation_payload(
                 anomaly_rgba,
             ),
         }
+        precipitation_active = active_stations(rows, ACCUMULATED_COLUMN, grid.territory)
+        active_ids = set(precipitation_active["dataset_id"])
+        diagnostic = rows.loc[
+            rows["estacion"].str.contains("Chascom", case=False, na=False)
+        ]
+        for station in diagnostic.itertuples(index=False):
+            included = station.dataset_id in active_ids
+            LOGGER.debug(
+                "Estación=%s período=%s precipitación=%s lat=%s lon=%s "
+                "ACTIVE_STATIONS=%s IDW=%s",
+                station.estacion, period, getattr(station, ACCUMULATED_COLUMN),
+                station.latitud, station.longitud,
+                "YES" if included else "NO", "YES" if included else "NO",
+            )
+        las_armas = rows.loc[
+            rows["estacion"].str.contains("Las Armas", case=False, na=False)
+        ]
+        for station in las_armas.itertuples(index=False):
+            accumulated = float(getattr(station, ACCUMULATED_COLUMN))
+            LOGGER.debug(
+                "Consistencia estación=%s período=%s promedio=%.1f mm "
+                "acumulado=%.1f mm gráfico=%.1f mm color=%.1f mm IDW=%.1f mm "
+                "máximo_global=%.1f mm escala=log normalizado=%.8f",
+                station.estacion, period, float(getattr(station, MEAN_COLUMN)),
+                accumulated, accumulated, accumulated, accumulated, maximum,
+                normalize_precipitation_for_color(accumulated, maximum, "log"),
+            )
         for mode, (column, limit, colorizer) in modes.items():
             if column not in rows:
                 period_payload[mode] = {
                     "image": None, "station_count": 0, "has_estimation": False,
                 }
                 continue
+            active = active_stations(rows, column, grid.territory)
+            validate_active_station_coverage(
+                active, grid.territory, config.MAX_INTERPOLATION_DISTANCE_KM
+            )
             result = interpolate(
                 config.INTERPOLATION_METHOD,
-                rows["longitud"].to_numpy(dtype=float),
-                rows["latitud"].to_numpy(dtype=float),
-                rows[column].to_numpy(dtype=float),
+                active["longitud"].to_numpy(dtype=float),
+                active["latitud"].to_numpy(dtype=float),
+                active[column].to_numpy(dtype=float),
                 grid,
                 power=config.IDW_POWER,
                 maximum_distance_km=config.MAX_INTERPOLATION_DISTANCE_KM,
                 minimum_stations=config.MIN_INTERPOLATION_STATIONS,
             )
+            if (
+                config.SPATIAL_DEBUG and mode == "absolute"
+                and str(period) == config.SPATIAL_DEBUG_PERIOD
+            ):
+                LOGGER.info("Resumen espacial %s: %s", period, result.diagnostics)
+            if (
+                config.SPATIAL_DEBUG and mode == "absolute"
+                and str(period) == config.SPATIAL_DEBUG_PERIOD
+            ):
+                chascomus = active.loc[
+                    active["estacion"].str.contains("Chascom", case=False, na=False)
+                ]
+                for station in chascomus.itertuples(index=False):
+                    exact = idw_at_points(
+                        active["longitud"].to_numpy(float),
+                        active["latitud"].to_numpy(float),
+                        active[column].to_numpy(float),
+                        np.array([station.longitud]), np.array([station.latitud]),
+                        grid.territory, power=config.IDW_POWER,
+                        maximum_distance_km=config.MAX_INTERPOLATION_DISTANCE_KM,
+                    )
+                    inside_bbox = (
+                        grid.longitudes.min() <= station.longitud <= grid.longitudes.max()
+                        and grid.latitudes.min() <= station.latitud <= grid.latitudes.max()
+                    )
+                    nearest_x = int(np.abs(grid.longitudes - station.longitud).argmin())
+                    nearest_y = int(np.abs(grid.latitudes - station.latitud).argmin())
+                    LOGGER.info(
+                        "=== DIAGNÓSTICO ESPACIAL === estación=%s período=%s lat=%s "
+                        "lon=%s acumulado=%.1f ACTIVE_STATIONS=YES IDW=YES bbox=%s "
+                        "territorio=%s distancia_km=%.6f umbral=%s punto_grilla=%s "
+                        "valor_idw_exacto=%.1f máscara_final=%s grid_bounds=%s",
+                        station.estacion, period, station.latitud, station.longitud,
+                        float(getattr(station, ACCUMULATED_COLUMN)), inside_bbox,
+                        bool(exact.territory_mask[0]), exact.distances_km[0],
+                        bool(exact.distance_mask[0]),
+                        bool(result.valid_mask[nearest_y, nearest_x]), exact.values[0],
+                        bool(exact.valid_mask[0]), grid.bounds,
+                    )
             url = None
+            rgba = None
+            scale_images = None
             if result.valid_mask.any():
-                url = _rgba_data_url(colorizer(result.values, result.valid_mask, limit))
+                if mode == "absolute":
+                    rgba = precipitation_rgba(
+                        result.values, result.valid_mask, limit, scale="linear"
+                    )
+                    logarithmic_rgba = precipitation_rgba(
+                        result.values, result.valid_mask, limit, scale="log"
+                    )
+                    scale_images = {
+                        "linear": _rgba_data_url(rgba),
+                        "log": _rgba_data_url(logarithmic_rgba),
+                    }
+                    url = scale_images["linear"]
+                else:
+                    rgba = colorizer(result.values, result.valid_mask, limit)
+                    url = _rgba_data_url(rgba)
+            if (
+                config.SPATIAL_DEBUG and mode == "absolute"
+                and str(period) == config.SPATIAL_DEBUG_PERIOD and rgba is not None
+            ):
+                _write_spatial_debug(str(period), grid, result, rgba)
+                _write_alignment_debug(str(period), grid, active)
+            if (
+                config.SPATIAL_DEBUG and mode == "absolute"
+                and str(period) == config.SPATIAL_DEBUG_PERIOD and rgba is not None
+            ):
+                diagnostics = active.loc[
+                    active["estacion"].str.contains(
+                        "Chascom|Las Armas", case=False, regex=True, na=False
+                    )
+                ]
+                for station in diagnostics.itertuples(index=False):
+                    pixel = raster_pixel_for_coordinate(
+                        grid, station.longitud, station.latitud
+                    )
+                    latitude_index = len(grid.latitudes) - 1 - pixel.row
+                    final_rgba = orient_rgba_for_leaflet(rgba)
+                    pixel_value = float(result.values[latitude_index, pixel.column])
+                    exact = idw_at_points(
+                        active["longitud"].to_numpy(float),
+                        active["latitud"].to_numpy(float),
+                        active[column].to_numpy(float),
+                        np.array([station.longitud]), np.array([station.latitud]),
+                        grid.territory, power=config.IDW_POWER,
+                        maximum_distance_km=config.MAX_INTERPOLATION_DISTANCE_KM,
+                    )
+                    observed = float(getattr(station, ACCUMULATED_COLUMN))
+                    marker_rgba = precipitation_to_rgba(
+                        observed, maximum_mm=maximum, scale="log"
+                    )
+                    raster_rgba = precipitation_to_rgba(
+                        pixel_value, maximum_mm=maximum, scale="log"
+                    )
+                    LOGGER.info(
+                        "=== COLOR DIAGNOSTIC === estación=%s período=%s observado=%.3f "
+                        "IDW_exacto=%.3f IDW_pixel=%.3f máximo_global=%.3f escala=log "
+                        "normalización_lineal=%.8f normalización_log=%.8f "
+                        "normalización_marcador=%.8f normalización_raster=%.8f "
+                        "RGBA_marcador=%s RGBA_raster=%s alpha=%d; "
+                        "row=%d column=%d centro=(%.6f, %.6f) "
+                        "bounds=(W %.6f E %.6f S %.6f N %.6f) inside_country=%s "
+                        "RGBA_lineal_embebido=%s",
+                        station.estacion, period, observed, float(exact.values[0]),
+                        pixel_value, maximum,
+                        normalize_precipitation_for_color(observed, maximum, "linear"),
+                        normalize_precipitation_for_color(observed, maximum, "log"),
+                        normalize_precipitation_for_color(observed, maximum, "log"),
+                        normalize_precipitation_for_color(pixel_value, maximum, "log"),
+                        marker_rgba, raster_rgba, raster_rgba[3],
+                        pixel.row, pixel.column, pixel.center_latitude,
+                        pixel.center_longitude, pixel.west, pixel.east,
+                        pixel.south, pixel.north,
+                        bool(grid.territory_mask[latitude_index, pixel.column]),
+                        tuple(int(value) for value in final_rgba[pixel.row, pixel.column]),
+                    )
             period_payload[mode] = {
-                "image": url,
-                "station_count": result.station_count,
+                "station_count": int(len(active)),
+                "location_count": result.station_count,
                 "has_estimation": url is not None,
             }
+            if mode == "absolute":
+                period_payload[mode]["images"] = scale_images
+            else:
+                period_payload[mode]["image"] = url
         payload[str(period)] = period_payload
     return dict(sorted(payload.items(), key=lambda item: _period_key(item[0])))
 
@@ -256,14 +558,16 @@ def _controls_html(maximum: float, audit: dict[str, object] | None = None) -> st
       #stats-panel {{ right: 12px; top: 150px; width: 245px; padding: 12px; }}
       #stats-panel h4 {{ margin:0 0 7px; font-size:15px; }}
       #stats-grid {{ display:grid; grid-template-columns:1fr auto; gap:3px 10px; }}
-      #legend-panel {{ left: 12px; bottom: 24px; width: 185px; padding:10px; }}
+      #legend-panel {{ left: 12px; bottom: 24px; width: 370px; padding:10px; }}
       #update-panel {{ left: 52px; top: 12px; padding:8px 11px; }}
       #analysis-panel {{ left:52px; top:108px; width:310px; padding:9px; }}
       #analysis-panel select {{ width:100%; margin:2px 0 5px; }}
-      #series-chart {{ width:100%; height:120px; background:#fafafa; }}
+      #series-chart {{ width:100%; height:145px; background:#fafafa; }}
       #series-summary {{ font-size:11px; }}
       #legend-gradient {{ height:12px; background:linear-gradient(to right,{stops}); margin:6px 0 2px; }}
-      #legend-values {{ display:flex; justify-content:space-between; }}
+      #legend-values {{ position:relative; height:48px; font-size:9px; overflow:visible; }}
+      #legend-values span {{ position:absolute; top:2px; transform:translateX(-50%) rotate(-45deg);
+        transform-origin:top center; white-space:nowrap; }}
       .leaflet-popup-content table {{ border-collapse:collapse; }}
       .leaflet-popup-content td {{ padding:2px 5px; border-bottom:1px solid #eee; }}
       @media(max-width:700px) {{ #stats-panel {{ top:180px; width:190px; }}
@@ -279,6 +583,7 @@ def _controls_html(maximum: float, audit: dict[str, object] | None = None) -> st
       <div id="time-description">Precipitación acumulada trimestral · flechas ←/→ para navegar</div>
     </div>
     <div id="stats-panel" class="precip-panel"><h4>Estadísticas del período</h4>
+      <small id="stats-basis">Sobre acumulados trimestrales por estación</small>
       <div id="stats-grid"></div></div>
     <div id="update-panel" class="precip-panel"><strong>Precipitaciones Argentina</strong><br>
       Última actualización: {generated_label}<br>Datasets utilizados: {datasets} · Estaciones: {stations}<br>
@@ -288,22 +593,30 @@ def _controls_html(maximum: float, audit: dict[str, object] | None = None) -> st
         <option value="absolute">Precipitación absoluta (mm)</option>
         <option value="anomaly_abs">Anomalía absoluta (mm)</option>
         <option value="anomaly_rel">Anomalía relativa (%)</option></select>
+      <label>Escala de color</label><select id="color-scale-select">
+        <option value="log" selected>Logarítmica</option>
+        <option value="linear">Lineal</option></select>
+      <label title="Muestra la superficie IDW con opacidad total para comparar directamente sus colores con la leyenda.">
+        <input type="checkbox" id="idw-opaque-checkbox"> IDW sin transparencia</label><br>
       <label>Provincia</label><select id="province-filter"><option value="">Argentina completa</option></select>
       <label>Fuente</label><select id="source-filter"><option value="">Todas las fuentes</option></select>
       <label>Serie por estación</label><select id="station-select"></select>
-      <label>Comparación</label><select id="comparison-quarter"><option value="">Serie completa</option>
-        <option>T1</option><option>T2</option><option>T3</option><option>T4</option></select>
-      <svg id="series-chart" viewBox="0 0 300 120" preserveAspectRatio="none"></svg>
+      <label>Comparación</label><select id="comparison-quarter">
+        <option value="annual" selected>Trimestres del año seleccionado</option>
+        <option value="full">Serie completa</option></select>
+      <div id="series-title"><strong>Precipitación acumulada trimestral</strong></div>
+      <svg id="series-chart" viewBox="0 0 300 130" preserveAspectRatio="none"></svg>
       <div id="series-summary"></div>
     </details>
-    <div id="legend-panel" class="precip-panel"><strong id="legend-title">Precipitación observada (mm)</strong>
-      <div id="legend-gradient"></div><div id="legend-values"><span>0</span>
-      <span id="legend-maximum">{maximum:g}</span></div><small id="legend-note">Escala global · cortes cada 10 mm</small><br>
+    <div id="legend-panel" class="precip-panel"><strong id="legend-title">Precipitación acumulada trimestral (mm)</strong>
+      <div id="legend-gradient"></div><div id="legend-values">0 · {maximum:g} mm</div>
+      <small id="legend-note">Color: escala logarítmica · valores expresados en mm</small><br>
       <small>● observado &nbsp; ≠ estimación espacial</small></div>
     """
 
 
 def _map_script(
+    map_name: str,
     observations_name: str,
     interpolation_name: str,
     coverage_heatmap_name: str,
@@ -313,6 +626,8 @@ def _map_script(
     maximum: float,
     anomaly_maximum: float,
     relative_limit: float,
+    linear_ticks: list[float],
+    log_ticks: list[float],
 ) -> str:
     data_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     interpolation_json = json.dumps(
@@ -320,13 +635,18 @@ def _map_script(
     )
     bounds_json = json.dumps(interpolation_bounds)
     colors_json = json.dumps(COLOR_STOPS)
+    linear_ticks_json = json.dumps(linear_ticks)
+    log_ticks_json = json.dumps(log_ticks)
     return f"""
     const precipitationData = {data_json};
     const interpolationData = {interpolation_json};
     const precipitationMaximum = {maximum};
     const anomalyMaximum = {anomaly_maximum};
     const relativeAnomalyLimit = {relative_limit};
+    const idwDefaultOpacity = {config.IDW_DEFAULT_OPACITY};
     const precipitationColors = {colors_json};
+    const linearLegendTicks = {linear_ticks_json};
+    const logLegendTicks = {log_ticks_json};
     const stationMetadata = precipitationData.stations;
     const periodRows = precipitationData.periods;
     const periods = Object.keys(periodRows);
@@ -337,26 +657,50 @@ def _map_script(
     const previousButton = document.getElementById('previous-period');
     const nextButton = document.getElementById('next-period');
     const modeSelect = document.getElementById('mode-select');
+    const colorScaleSelect = document.getElementById('color-scale-select');
+    const idwOpaqueCheckbox = document.getElementById('idw-opaque-checkbox');
     const provinceFilter = document.getElementById('province-filter');
     const sourceFilter = document.getElementById('source-filter');
     const stationSelect = document.getElementById('station-select');
     const comparisonQuarter = document.getElementById('comparison-quarter');
     const seriesChart = document.getElementById('series-chart');
+    const seriesTitle = document.getElementById('series-title');
     const seriesSummary = document.getElementById('series-summary');
     const query = new URLSearchParams(window.location.search);
     const requestedMode = query.get('mode');
     if (['absolute','anomaly_abs','anomaly_rel'].includes(requestedMode)) modeSelect.value=requestedMode;
+    const requestedScale = query.get('scale');
+    if (['linear','log'].includes(requestedScale)) colorScaleSelect.value=requestedScale;
+    if (query.get('opaque')==='1') idwOpaqueCheckbox.checked=true;
+    const focusLat=Number(query.get('lat')), focusLon=Number(query.get('lon'));
+    const focusZoom=Number(query.get('zoom'));
+    if(Number.isFinite(focusLat) && Number.isFinite(focusLon))
+      {map_name}.setView([focusLat,focusLon],Number.isFinite(focusZoom) ? focusZoom : 8);
     slider.max = Math.max(0, periods.length - 1);
     slider.value = Math.max(0, periods.length - 1);
+    const requestedPeriod = query.get('period');
+    if (periods.includes(requestedPeriod)) slider.value=periods.indexOf(requestedPeriod);
     let timer = null;
     let interpolationOverlay = null;
+    let idwOpaque = idwOpaqueCheckbox.checked;
+
+    function getCurrentIdwOpacity() {{ return idwOpaque ? 1.0 : idwDefaultOpacity; }}
+    function updateIdwOpacity() {{
+      idwOpaque=idwOpaqueCheckbox.checked;
+      if(interpolationOverlay) interpolationOverlay.setOpacity(getCurrentIdwOpacity());
+    }}
 
     function escapeHtml(value) {{
       return String(value ?? '—').replace(/[&<>'"]/g, char =>
         ({{'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}})[char]);
     }}
+    function normalizePrecipitationForColor(value,scale) {{
+      if (precipitationMaximum <= 0) return 0;
+      const bounded=Math.max(0,Math.min(precipitationMaximum,value));
+      return scale==='log' ? Math.log1p(bounded)/Math.log1p(precipitationMaximum) : bounded/precipitationMaximum;
+    }}
     function absoluteColor(value) {{
-      const ratio = precipitationMaximum > 0 ? Math.max(0, Math.min(1, value / precipitationMaximum)) : 0;
+      const ratio = normalizePrecipitationForColor(value,colorScaleSelect.value);
       function rgb(hex) {{ return [1,3,5].map(i => parseInt(hex.slice(i,i+2),16)); }}
       for (let i=0; i<precipitationColors.length-1; i++) {{
         const first=precipitationColors[i], last=precipitationColors[i+1];
@@ -388,37 +732,44 @@ def _map_script(
         value, modeSelect.value==='anomaly_abs' ? anomalyMaximum : relativeAnomalyLimit);
     }}
     function popup(station,row,period) {{
+      const statistics = !row || !row[3]
+        ? '<div style="margin-top:8px;padding-top:7px;border-top:1px solid #bbb"><b>Estadísticas pluviométricas observadas</b><br>Sin registros de precipitación disponibles para este período</div>'
+        : `<div style="margin-top:8px;padding-top:7px;border-top:1px solid #bbb"><b>Estadísticas pluviométricas observadas</b><table>
+          <tr><td><b>Promedio de los registros</b></td><td>${{Number(row[8]).toFixed(1)}} mm</td></tr>
+          <tr><td><b>Acumulado trimestral</b></td><td>${{Number(row[11]).toFixed(1)}} mm</td></tr>
+          <tr><td><b>Valor utilizado para color</b></td><td>${{Number(row[2]).toFixed(1)}} mm</td></tr>
+          <tr><td><b>Mínimo registrado</b></td><td>${{Number(row[9]).toFixed(1)}} mm</td></tr>
+          <tr><td><b>Máximo registrado</b></td><td>${{Number(row[10]).toFixed(1)}} mm</td></tr>
+          <tr><td><b>Cantidad de registros válidos</b></td><td>${{row[3]}}</td></tr></table>
+          <small>Exclusivamente observaciones reales; no incluye IDW ni estaciones vecinas.</small></div>`;
       const [year,quarter] = period.split('-');
       const fields = [['Estación',station.e],['Localidad',station.l],
         ['Provincia',station.p],['Fuente',station.f],['Dataset',station.d],
         ['Archivo',station.a],['Año',year],['Trimestre',quarter],['Período',period],
-        ['Precipitación original',`${{row[1]}} ${{station.u}}`],
-        ['Precipitación en mm',`${{Number(row[2]).toFixed(1)}} mm`],
-        ['Normal histórica',row[4] == null ? 'Sin normal suficiente' : `${{Number(row[4]).toFixed(1)}} mm`],
-        ['Años históricos',row[7] ?? '—'],
-        ['Anomalía absoluta',row[5] == null ? '—' : `${{Number(row[5]).toFixed(1)}} mm`],
-        ['Anomalía relativa',row[6] == null ? '—' : `${{Number(row[6]).toFixed(1)}} %`],
         ['Latitud',station.y],['Longitud',station.x],['Tipo','Dato observado']];
-      return '<table>' + fields.map(item => `<tr><td><b>${{escapeHtml(item[0])}}</b></td><td>${{escapeHtml(item[1])}}</td></tr>`).join('') + '</table>';
+      return '<b>Metadatos de la estación</b><table>' + fields.map(item => `<tr><td><b>${{escapeHtml(item[0])}}</b></td><td>${{escapeHtml(item[1])}}</td></tr>`).join('') + '</table>' + statistics;
     }}
     function renderPeriod(index) {{
       const period = periods[index]; if (!period) return;
       {observations_name}.clearLayers();
       const visibleRows=filteredRows(period); const values=[];
-      for (const row of visibleRows) {{
-        const station = stationMetadata[row[0]]; const value=valueFor(row); if (value == null) continue;
-        values.push(Number(value)); const color = colorFor(Number(value));
+      const rowsByStation=new Map(visibleRows.map(row=>[row[0],row]));
+      stationMetadata.forEach((station,stationIndex) => {{ if(!stationAllowed(station)) return;
+        const row=rowsByStation.get(stationIndex); const value=row ? valueFor(row) : null;
+        if(value != null) values.push(Number(value)); const color=value == null ? '#9e9e9e' : colorFor(Number(value));
         L.circleMarker([station.y,station.x], {{radius:6,color:'#263238',weight:.6,
           fillColor:color,fillOpacity:.9}})
-          .bindTooltip(`${{escapeHtml(station.e)}}<br><b>${{Number(value).toFixed(1)}} ${{unitForMode()}}</b>`)
+          .bindTooltip(value == null ? `${{escapeHtml(station.e)}}<br><b>Sin registros para el período</b>` : `${{escapeHtml(station.e)}}<br><b>${{Number(value).toFixed(1)}} ${{unitForMode()}}</b>`)
           .bindPopup(popup(station,row,period), {{maxWidth:390}}).addTo({observations_name});
-      }}
+      }});
       label.textContent = period;
       const estimationSet = interpolationData[period];
       const estimation = estimationSet ? estimationSet[modeSelect.value] : null;
       if (interpolationOverlay) {{ {interpolation_name}.removeLayer(interpolationOverlay); interpolationOverlay=null; }}
-      if (estimation && estimation.image) {{
-        interpolationOverlay=L.imageOverlay(estimation.image,{bounds_json},{{opacity:.72,interactive:false,pane:'tilePane'}});
+      const estimationImage=estimation && modeSelect.value==='absolute' && estimation.images
+        ? estimation.images[colorScaleSelect.value] : estimation ? estimation.image : null;
+      if (estimationImage) {{
+        interpolationOverlay=L.imageOverlay(estimationImage,{bounds_json},{{opacity:getCurrentIdwOpacity(),interactive:false,pane:'tilePane'}});
         interpolationOverlay.addTo({interpolation_name});
       }}
       values.sort((a,b)=>a-b); const mean=values.reduce((a,b)=>a+b,0)/(values.length||1);
@@ -427,7 +778,7 @@ def _map_script(
         ['Estaciones',new Set(visibleRows.map(row=>row[0])).size],
         ['Datasets',new Set(visibleRows.map(row=>stationMetadata[row[0]].d)).size],
         ['Fuentes',new Set(visibleRows.map(row=>stationMetadata[row[0]].f)).size],
-        ['IDW',estimation && estimation.has_estimation ? `${{estimation.station_count}} estaciones · estimación de red completa` : 'Sin datos suficientes'],
+        ['IDW',estimation && estimation.has_estimation ? `${{estimation.station_count}} estaciones activas · ${{estimation.location_count}} ubicaciones · estimación de red completa` : 'Sin datos suficientes'],
         ['Mínima',values.length ? `${{values[0].toFixed(1)}} ${{unitForMode()}}` : '—'],
         ['Máxima',values.length ? `${{values.at(-1).toFixed(1)}} ${{unitForMode()}}` : '—'],
         ['Media',values.length ? `${{mean.toFixed(1)}} ${{unitForMode()}}` : '—'],
@@ -438,11 +789,19 @@ def _map_script(
       const title=document.getElementById('legend-title'), labels=document.getElementById('legend-values');
       const gradient=document.getElementById('legend-gradient'), note=document.getElementById('legend-note');
       const description=document.getElementById('time-description');
-      if(modeSelect.value==='absolute') {{ title.textContent='Precipitación observada (mm)';
+      const statsBasis=document.getElementById('stats-basis');
+      colorScaleSelect.disabled=modeSelect.value!=='absolute';
+      if(modeSelect.value==='absolute') {{ title.textContent='Precipitación acumulada trimestral (mm)';
+        statsBasis.textContent='Sobre acumulados trimestrales por estación';
         description.textContent='Precipitación acumulada trimestral · flechas ←/→ para navegar';
-        labels.innerHTML=`<span>0</span><span>${{precipitationMaximum}}</span>`;
-        gradient.style.background='linear-gradient(to right,#ffffd9,#c7e9b4,#7fcdbb,#41b6c4,#225ea8,#081d58)'; note.textContent='Escala global · cortes cada 10 mm'; }}
+        const ticks=colorScaleSelect.value==='log' ? logLegendTicks : linearLegendTicks;
+        labels.innerHTML=ticks.map(value=>{{ const position=normalizePrecipitationForColor(value,colorScaleSelect.value)*100;
+          return `<span style="left:${{position}}%">${{Number(value).toLocaleString('es-AR',{{maximumFractionDigits:1}})}}</span>`;
+        }}).join('');
+        gradient.style.background='linear-gradient(to right,#ffffd9,#c7e9b4,#7fcdbb,#41b6c4,#225ea8,#081d58)';
+        note.textContent=`Color: escala ${{colorScaleSelect.value==='log' ? 'logarítmica' : 'lineal'}} · valores expresados en mm`; }}
       else {{ const limit=modeSelect.value==='anomaly_abs' ? anomalyMaximum : relativeAnomalyLimit;
+        statsBasis.textContent=modeSelect.value==='anomaly_abs' ? 'Sobre anomalías absolutas por estación' : 'Sobre anomalías relativas por estación';
         description.textContent=(modeSelect.value==='anomaly_abs' ? 'Anomalía absoluta trimestral' : 'Anomalía relativa trimestral')+' · flechas ←/→ para navegar';
         title.textContent=modeSelect.value==='anomaly_abs' ? 'Anomalía absoluta (mm)' : 'Anomalía relativa (%)';
         labels.innerHTML=`<span>−${{limit.toFixed(0)}}</span><span>0</span><span>+${{limit.toFixed(0)}}</span>`;
@@ -455,28 +814,67 @@ def _map_script(
     }}
     function updateStations() {{
       const previous=stationSelect.value; stationSelect.innerHTML='';
-      stationMetadata.forEach((station,index)=>{{ if(stationAllowed(station)) stationSelect.add(new Option(station.e,index)); }});
+      stationMetadata.map((station,index)=>({{station,index}})).filter(item=>stationAllowed(item.station))
+        .sort((a,b)=>a.station.e.localeCompare(b.station.e,'es',{{sensitivity:'base'}}))
+        .forEach(item=>stationSelect.add(new Option(item.station.e,item.index)));
       if([...stationSelect.options].some(option=>option.value===previous)) stationSelect.value=previous;
-      {coverage_heatmap_name}.setLatLngs(stationMetadata.filter(stationAllowed).map(s=>[s.y,s.x,1]));
       renderSeries(); renderPeriod(Number(slider.value));
     }}
-    function renderSeries() {{
-      const stationIndex=Number(stationSelect.value), quarter=comparisonQuarter.value; if(!Number.isFinite(stationIndex)) return;
-      const data=[]; periods.forEach((period,index)=>{{ const row=periodRows[period].find(item=>item[0]===stationIndex);
-        if(row && (!quarter || period.endsWith(quarter))) {{ const value=valueFor(row); if(value!=null) data.push([index,Number(value),period]); }} }});
-      if(!data.length) {{ seriesChart.innerHTML=''; seriesSummary.textContent='Sin datos para la selección'; return; }}
-      const vals=data.map(d=>d[1]), min=Math.min(...vals), max=Math.max(...vals), span=max-min||1;
-      const points=data.map((d,i)=>`${{i/(data.length-1||1)*296+2}},${{116-(d[1]-min)/span*110}}`).join(' ');
-      seriesChart.innerHTML=`<polyline points="${{points}}" fill="none" stroke="#225ea8" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
-      seriesSummary.textContent=`${{data[0][2]}} → ${{data.at(-1)[2]}} · mín ${{min.toFixed(1)}} · máx ${{max.toFixed(1)}} ${{unitForMode()}}`;
+    function selectedPeriod() {{ return periods[Number(slider.value)] || ''; }}
+    function chartGrid(minimum,maximum,unit) {{
+      const top=10,bottom=100,span=maximum-minimum||1; const items=[];
+      for(let index=0;index<=4;index++) {{
+        const ratio=index/4,y=bottom-ratio*(bottom-top),value=minimum+ratio*span;
+        items.push(`<line x1="35" y1="${{y}}" x2="292" y2="${{y}}" stroke="#d7dce0" stroke-width="0.7"/>`);
+        items.push(`<text x="32" y="${{y+3}}" text-anchor="end" font-size="8" fill="#59636b">${{value.toFixed(1)}}${{unit}}</text>`);
+      }}
+      return items.join('');
     }}
-    slider.addEventListener('input', event => renderPeriod(Number(event.target.value)));
+    function updateAnnualQuarterChart(stationIndex,period) {{
+      if(!period) return; const [year,activeQuarter]=period.split('-');
+      const station=stationMetadata[stationIndex];
+      const data=['T1','T2','T3','T4'].map((quarter,index)=>{{
+        const itemPeriod=`${{year}}-${{quarter}}`;
+        const row=(periodRows[itemPeriod] || []).find(item=>item[0]===stationIndex);
+        return {{quarter,period:itemPeriod,value:row && row[2] != null ? Number(row[2]) : null,index}};
+      }});
+      const available=data.filter(item=>item.value != null); const values=available.map(item=>item.value);
+      const maximum=Math.max(...values,1); const x=index=>43+index*80; const y=value=>100-value/maximum*90;
+      const segments=[]; for(let index=0;index<3;index++) {{ const a=data[index],b=data[index+1];
+        if(a.value != null && b.value != null) segments.push(`<line x1="${{x(index)}}" y1="${{y(a.value)}}" x2="${{x(index+1)}}" y2="${{y(b.value)}}" stroke="#225ea8" stroke-width="2"/>`); }}
+      const points=data.map(item=>{{ const active=item.quarter===activeQuarter;
+        if(item.value == null) return `<g><line x1="${{x(item.index)-4}}" y1="88" x2="${{x(item.index)+4}}" y2="96" stroke="#999"/><line x1="${{x(item.index)+4}}" y1="88" x2="${{x(item.index)-4}}" y2="96" stroke="#999"/><title>${{item.period}} · Sin datos</title></g>`;
+        return `<circle cx="${{x(item.index)}}" cy="${{y(item.value)}}" r="${{active?6:4}}" fill="#225ea8" stroke="${{active?'#f57c00':'#fff'}}" stroke-width="${{active?3:1}}"><title>Estación: ${{escapeHtml(station.e)}} · Período: ${{item.period}} · Precipitación acumulada: ${{item.value.toFixed(1)}} mm</title></circle>`;
+      }}).join('');
+      const labels=data.map(item=>`<text x="${{x(item.index)}}" y="118" text-anchor="middle" font-size="10" fill="${{item.quarter===activeQuarter?'#f57c00':'#333'}}" font-weight="${{item.quarter===activeQuarter?'bold':'normal'}}">${{item.quarter}}</text>`).join('');
+      seriesChart.innerHTML=`${{chartGrid(0,maximum,' mm')}}<line x1="35" y1="100" x2="292" y2="100" stroke="#777"/>${{segments.join('')}}${{points}}${{labels}}`;
+      seriesTitle.innerHTML=`<strong>${{escapeHtml(station.e)}}</strong><br>Precipitación acumulada trimestral — Año: ${{year}}`;
+      if(!values.length) seriesSummary.textContent=`${{year}} · 0 de 4 trimestres con datos · Sin datos`;
+      else {{ const min=Math.min(...values),max=Math.max(...values), count=values.length;
+        seriesSummary.textContent=count===4 ? `${{year}} · T1–T4 · mín ${{min.toFixed(1)}} · máx ${{max.toFixed(1)}} mm` : `${{year}} · ${{count}} de 4 trimestres con datos · mín ${{min.toFixed(1)}} · máx ${{max.toFixed(1)}} mm`; }}
+    }}
+    function renderSeries() {{
+      const stationIndex=Number(stationSelect.value); if(!Number.isFinite(stationIndex)) return;
+      if(comparisonQuarter.value==='annual') {{ updateAnnualQuarterChart(stationIndex,selectedPeriod()); return; }}
+      const data=[]; periods.forEach((period,index)=>{{ const row=periodRows[period].find(item=>item[0]===stationIndex);
+        if(row) {{ const value=valueFor(row); if(value!=null) data.push([index,Number(value),period]); }} }});
+      if(!data.length) {{ seriesChart.innerHTML=''; seriesSummary.textContent='Sin datos para la selección'; return; }}
+      const vals=data.map(d=>d[1]), rawMin=Math.min(...vals), rawMax=Math.max(...vals);
+      const min=modeSelect.value==='absolute' ? 0 : Math.min(0,rawMin), max=Math.max(rawMax,min+1), span=max-min;
+      const points=data.map((d,i)=>`${{i/(data.length-1||1)*250+38}},${{100-(d[1]-min)/span*90}}`).join(' ');
+      seriesChart.innerHTML=`${{chartGrid(min,max,' '+unitForMode())}}<polyline points="${{points}}" fill="none" stroke="#225ea8" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+      seriesTitle.innerHTML=`<strong>${{escapeHtml(stationMetadata[stationIndex].e)}}</strong><br>Serie histórica · ${{modeSelect.options[modeSelect.selectedIndex].text}}`;
+      seriesSummary.textContent=`${{data[0][2]}} → ${{data.at(-1)[2]}} · mín ${{rawMin.toFixed(1)}} · máx ${{rawMax.toFixed(1)}} ${{unitForMode()}}`;
+    }}
+    slider.addEventListener('input', event => {{renderPeriod(Number(event.target.value));renderSeries();}});
     modeSelect.addEventListener('change',()=>{{updateLegend();renderSeries();renderPeriod(Number(slider.value));}});
+    colorScaleSelect.addEventListener('change',()=>{{updateLegend();renderPeriod(Number(slider.value));}});
+    idwOpaqueCheckbox.addEventListener('change',updateIdwOpacity);
     provinceFilter.addEventListener('change',updateStations); sourceFilter.addEventListener('change',updateStations);
     stationSelect.addEventListener('change',renderSeries); comparisonQuarter.addEventListener('change',renderSeries);
     function movePeriod(delta) {{
       slider.value=Math.max(0,Math.min(periods.length-1,Number(slider.value)+delta));
-      renderPeriod(Number(slider.value));
+      renderPeriod(Number(slider.value)); renderSeries();
     }}
     previousButton.addEventListener('click', () => movePeriod(-1));
     nextButton.addEventListener('click', () => movePeriod(1));
@@ -487,7 +885,7 @@ def _map_script(
     playButton.addEventListener('click', () => {{
       if (timer) {{ clearInterval(timer); timer=null; playButton.textContent='▶'; return; }}
       playButton.textContent='❚❚'; timer=setInterval(() => {{
-        slider.value=(Number(slider.value)+1)%periods.length; renderPeriod(Number(slider.value));
+        slider.value=(Number(slider.value)+1)%periods.length; renderPeriod(Number(slider.value)); renderSeries();
       }},900);
     }});
     populateFilters();
@@ -514,6 +912,7 @@ def generate_map(
     """Genera un HTML estático con datos meteorológicos y provinciales embebidos."""
     if frame.empty:
         raise ValueError("No hay observaciones trimestrales para visualizar")
+    frame = ensure_quarterly_canonical_columns(frame)
     if not provinces_path.is_file():
         raise FileNotFoundError(f"No se encontró {provinces_path}")
     if "anomalia_absoluta_mm" not in frame:
@@ -524,7 +923,10 @@ def generate_map(
             minimum_years=config.MIN_HISTORICAL_YEARS,
         )
     maximum = precipitation_global_maximum(frame)
-    generate_precipitation_ticks(maximum, config.PRECIPITATION_STEP)
+    linear_ticks = thin_legend_ticks(
+        generate_precipitation_ticks(maximum, config.PRECIPITATION_STEP)
+    )
+    log_ticks = generate_log_legend_ticks(maximum)
     anomaly_maximum = float(frame["anomalia_absoluta_mm"].abs().max())
     if pd.isna(anomaly_maximum) or anomaly_maximum == 0:
         anomaly_maximum = 1.0
@@ -548,12 +950,13 @@ def generate_map(
             "potencia_idw": config.IDW_POWER,
             "resolucion_grados": config.GRID_RESOLUTION,
             "distancia_maxima_km": config.MAX_INTERPOLATION_DISTANCE_KM,
+            "crs_distancias": config.DISTANCE_CRS,
             "minimo_estaciones": config.MIN_INTERPOLATION_STATIONS,
             "periodos_con_estimacion": estimated_periods,
             "periodos_sin_datos_suficientes": len(interpolation_payload)
             - estimated_periods,
             "mascara_territorial": True,
-            "mascara_convex_hull": True,
+            "mascara_convex_hull": False,
             "fuera_de_cobertura_transparente": True,
         }
 
@@ -569,9 +972,16 @@ def generate_map(
         name="Precipitación interpolada (estimación IDW)", show=True
     ).add_to(map_object)
     coverage = folium.FeatureGroup(name="Cobertura espacial", show=False).add_to(map_object)
-    unique_stations = frame.loc[
-        frame["provincia"].str.casefold().ne("sin asignar")
-    ].drop_duplicates(subset=["dataset_id"])
+    all_stations = frame.drop_duplicates(subset=["dataset_id"]).copy()
+    finite_coordinates = np.isfinite(all_stations["longitud"]) & np.isfinite(
+        all_stations["latitud"]
+    )
+    inside_territory = intersects_xy(
+        territory,
+        all_stations["longitud"].to_numpy(float),
+        all_stations["latitud"].to_numpy(float),
+    )
+    unique_stations = all_stations.loc[finite_coordinates & inside_territory]
     station_coordinates = unique_stations[["longitud", "latitud"]].to_numpy(float)
     distance_rgba, coverage_metrics = coverage_rgba(spatial_grid, station_coordinates)
     if audit is not None:
@@ -624,9 +1034,11 @@ def generate_map(
     map_object.add_child(
         _DeferredScript(
             _map_script(
+                map_object.get_name(),
                 observations.get_name(), interpolation.get_name(), coverage_heatmap.get_name(),
                 temporal_payload, interpolation_payload, spatial_grid.bounds,
                 maximum, anomaly_maximum, config.RELATIVE_ANOMALY_COLOR_LIMIT,
+                linear_ticks, log_ticks,
             )
         )
     )

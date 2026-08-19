@@ -10,22 +10,24 @@ import numpy as np
 import pandas as pd
 
 from . import config
-from .spatial import cross_validate_idw
+from .spatial import active_stations, cross_validate_idw
+from .temporal import ACCUMULATED_COLUMN, ensure_quarterly_canonical_columns
 
 
 def evaluate_idw(
     frame: pd.DataFrame, output_path: Path = config.OUTPUT_IDW_EVALUATION
 ) -> dict[str, Any]:
     """Calcula validación cruzada IDW por período y métricas globales ponderadas."""
+    frame = ensure_quarterly_canonical_columns(frame)
     periods: list[dict[str, Any]] = []
     absolute_errors: list[float] = []
     squared_errors: list[float] = []
     for period, rows in frame.groupby("periodo", sort=False):
-        rows = rows.loc[rows["provincia"].str.casefold().ne("sin asignar")]
+        rows = active_stations(rows, ACCUMULATED_COLUMN)
         result = cross_validate_idw(
             rows["longitud"].to_numpy(float),
             rows["latitud"].to_numpy(float),
-            rows["precipitacion_mm"].to_numpy(float),
+            rows[ACCUMULATED_COLUMN].to_numpy(float),
             config.IDW_POWER,
         )
         if not result.sample_count:

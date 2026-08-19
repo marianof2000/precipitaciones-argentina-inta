@@ -51,7 +51,8 @@ estación y trimestre. El modelo conserva dataset, archivo, fuente, estación, u
 año, trimestre, período, valor/unidad original y milímetros.
 
 Los trimestres son T1 (enero-marzo), T2 (abril-junio), T3 (julio-septiembre) y T4
-(octubre-diciembre). La agregación inicial es precipitación acumulada (`sum`) y es configurable;
+(octubre-diciembre). La variable científica publicada es precipitación acumulada y, por ello,
+la agregación trimestral se restringe explícitamente a `sum`;
 un dato ausente nunca se reemplaza por cero.
 
 ```bash
@@ -64,12 +65,22 @@ observaciones reales, cobertura de estaciones, selector de los 303 períodos, es
 escala cromática global desde 0 hasta el máximo real, con cortes conceptuales cada 10 mm.
 
 La Etapa 3 incorpora superficies IDW trimestrales. La grilla y su resolución se configuran en
-`config.py`; cada superficie se restringe al territorio, al convex hull de las estaciones del
-período y a una distancia máxima de 350 km respecto de una observación. Con menos de tres
-ubicaciones no colineales, la estimación queda transparente como “Sin datos suficientes”. Las
-estaciones “Sin asignar” se conservan como observaciones para trazabilidad, pero se excluyen de
-IDW y cobertura. Mayor distancia a estaciones implica mayor incertidumbre: IDW no convierte una
-estimación en observación ni garantiza igual confiabilidad en toda la superficie.
+`config.py`. La resolución productiva es `0.1°`; `0.05°` ofrece más detalle, pero aumenta
+considerablemente tiempo, memoria y tamaño del HTML. `SPATIAL_DEBUG` puede generar máscaras,
+alpha, RGBA e IDW auxiliares para un período elegido. Cada superficie se restringe al territorio
+y a una distancia máxima provisional de
+350 km respecto de una estación activa del período. El convex hull no actúa como frontera. Una
+estación activa tiene coordenadas, precipitación válida y ubicación dentro de la máscara
+territorial; su provincia declarada no la excluye. Con menos de tres ubicaciones la estimación
+queda transparente como “Sin datos suficientes”. Mayor distancia implica mayor incertidumbre:
+IDW no convierte una estimación en observación ni garantiza igual confiabilidad superficial.
+
+La convención espacial es única: `x/column = longitud` (oeste→este) y `y/row = latitud`.
+Las filas de cálculo avanzan sur→norte y son uniformes en Web Mercator, la proyección con la que
+Leaflet estira un `ImageOverlay`; la resolución configurada limita su separación angular máxima.
+El RGBA completo (color, máscara y alpha) se invierte verticalmente una sola vez al codificar el
+PNG en `orient_rgba_for_leaflet`, por lo que la fila visible 0 es el norte. Los bounds enviados a
+Leaflet son bordes exteriores de píxel en orden `[[south, west], [north, east]]`.
 
 El HTML incorpora los datos meteorológicos y el GeoJSON y puede copiarse directamente a un
 hosting estático. Folium/Leaflet y el mapa base usan recursos HTTPS externos; si el servidor de
@@ -109,8 +120,13 @@ comparación objetiva equivalente.
 
 Los filtros modifican los puntos observados, las estadísticas, la serie y la capa de soporte;
 la superficie IDW permanece calculada con la red nacional completa y se identifica como tal.
-El límite inicial de 350 km es configurable y evita extrapolaciones especialmente extensas: no
-se presenta como un umbral universal y debe recalibrarse con evidencia regional. La interfaz de
+El límite inicial provisional de 350 km es configurable y evita extrapolaciones especialmente
+extensas: no se presenta como un umbral universal y debe recalibrarse según la densidad,
+distribución territorial y distancia típica entre estaciones. Las distancias se calculan en un
+CRS métrico azimutal equidistante centrado en Argentina (`lat_0=-34`, `lon_0=-63`); EPSG:4326 se
+conserva sólo para datos y visualización. En la red actual, frente a distancias geodésicas WGS84,
+la aproximación presenta un error absoluto mediano de 0,024 %, percentil 95 de 0,183 % y máximo
+observado de 1,565 %. Por ello, el corte de 350 km debe interpretarse con esa tolerancia. La interfaz de
 interpolación acepta explícitamente un nombre de método, pero rechaza RBF o Kriging hasta que
 se implementen y validen, en lugar de sustituir silenciosamente el algoritmo.
 
@@ -149,7 +165,7 @@ límites e interpolaciones están embebidos. Requieren Internet las bibliotecas 
 - **Distancia:** la incertidumbre aumenta al alejarse de las observaciones.
 - **Datos faltantes:** ausencia de dato no equivale a precipitación cero.
 - **Calidad:** el resultado depende de la calidad y continuidad de los XLS originales.
-- **Escala temporal:** los acumulados dependen de la agregación trimestral configurada (`sum`).
+- **Escala temporal:** los acumulados usan obligatoriamente agregación trimestral `sum`.
 
 ## Checklist de versión 1.0.0
 

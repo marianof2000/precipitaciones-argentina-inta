@@ -13,7 +13,8 @@ LOGGER = logging.getLogger(__name__)
 NORMALIZED_COLUMNS = [
     "dataset_id", "archivo_origen", "fuente", "estacion", "localidad", "provincia",
     "latitud", "longitud", "fecha", "anio", "trimestre", "periodo",
-    "precipitacion_original", "unidad_original", "precipitacion_mm",
+    "precipitacion_original", "unidad_original", "tipo_precipitacion",
+    "precipitacion_mm",
 ]
 
 
@@ -46,6 +47,7 @@ def normalize_dataset(
             "fecha": pd.to_datetime(raw[date_column], errors="coerce"),
             "precipitacion_original": original,
             "unidad_original": config.unidad_precipitacion,
+            "tipo_precipitacion": config.tipo_precipitacion,
             "precipitacion_mm": precipitation_to_mm(original, config.unidad_precipitacion),
         }
     )

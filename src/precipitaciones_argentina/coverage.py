@@ -3,17 +3,19 @@
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .spatial import EARTH_KM_PER_DEGREE
+from .spatial import project_coordinates
 
 
 def nearest_station_distance_km(
     station_coordinates: np.ndarray, target_coordinates: np.ndarray
 ) -> np.ndarray:
-    """Calcula distancia aproximada a la estación más cercana en WGS84."""
+    """Calcula distancia métrica a la estación más cercana."""
     if len(station_coordinates) == 0:
         return np.full(len(target_coordinates), np.inf)
-    distances, _ = cKDTree(station_coordinates).query(target_coordinates, k=1)
-    return distances * EARTH_KM_PER_DEGREE
+    stations_metric = project_coordinates(station_coordinates)
+    targets_metric = project_coordinates(target_coordinates)
+    distances, _ = cKDTree(stations_metric).query(targets_metric, k=1)
+    return distances / 1000
 
 
 def stations_within_radius(
@@ -21,12 +23,14 @@ def stations_within_radius(
     target_coordinates: np.ndarray,
     radius_km: float,
 ) -> np.ndarray:
-    """Cuenta estaciones dentro de un radio aproximado para cada destino."""
+    """Cuenta estaciones dentro de un radio métrico para cada destino."""
     if radius_km <= 0:
         raise ValueError("El radio debe ser positivo")
     if len(station_coordinates) == 0:
         return np.zeros(len(target_coordinates), dtype=int)
-    neighbours = cKDTree(station_coordinates).query_ball_point(
-        target_coordinates, radius_km / EARTH_KM_PER_DEGREE
+    stations_metric = project_coordinates(station_coordinates)
+    targets_metric = project_coordinates(target_coordinates)
+    neighbours = cKDTree(stations_metric).query_ball_point(
+        targets_metric, radius_km * 1000
     )
     return np.fromiter((len(items) for items in neighbours), dtype=int)

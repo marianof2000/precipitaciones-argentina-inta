@@ -1,6 +1,6 @@
 [project]
 name = "precipitaciones-argentina"
-version = "1.1.0"
+version = "1.2.0"
 description = "ETL y visualización geoespacial y temporal de precipitaciones en Argentina"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
