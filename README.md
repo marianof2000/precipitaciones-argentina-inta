@@ -3,6 +3,8 @@
 Proyecto Python para integrar observaciones de precipitación de estaciones argentinas y,
 por etapas, construir un mapa geoespacial y temporal publicable como sitio estático.
 
+**Mapa publicado:** [marianof2000.github.io/precipitaciones-argentina-inta](https://marianof2000.github.io/precipitaciones-argentina-inta/)
+
 ## Arquitectura y dependencias
 
 El paquete `src/precipitaciones_argentina` separa catálogo, loaders, validación, normalización,
@@ -102,6 +104,9 @@ compacta por estación y período. Los límites provinciales se simplifican úni
 representación visual, preservando topología; la máscara IDW utiliza la geometría original. Estas
 optimizaciones no modifican el Parquet ni la metodología científica. El mapa permite reproducir,
 arrastrar el slider, usar los botones anterior/siguiente o navegar con las flechas del teclado.
+La leyenda “Precipitación acumulada trimestral (mm)” está abierta inicialmente y puede plegarse
+desde su encabezado para dejar libre el sector inferior izquierdo del mapa, del mismo modo que el
+panel “Análisis avanzado”.
 
 ## Análisis climático avanzado
 
@@ -126,9 +131,9 @@ distribución territorial y distancia típica entre estaciones. Las distancias s
 CRS métrico azimutal equidistante centrado en Argentina (`lat_0=-34`, `lon_0=-63`); EPSG:4326 se
 conserva sólo para datos y visualización. En la red actual, frente a distancias geodésicas WGS84,
 la aproximación presenta un error absoluto mediano de 0,024 %, percentil 95 de 0,183 % y máximo
-observado de 1,565 %. Por ello, el corte de 350 km debe interpretarse con esa tolerancia. La interfaz de
-interpolación acepta explícitamente un nombre de método, pero rechaza RBF o Kriging hasta que
-se implementen y validen, en lugar de sustituir silenciosamente el algoritmo.
+observado de 1,565 %. Por ello, el corte de 350 km debe interpretarse con esa tolerancia. La
+interfaz de interpolación acepta explícitamente un nombre de método, pero rechaza RBF o Kriging
+hasta que se implementen y validen, en lugar de sustituir silenciosamente el algoritmo.
 
 ## Calidad
 
@@ -139,9 +144,24 @@ uv run ruff check .
 
 ## Publicación estática
 
-Ejecutar `uv run precipitaciones` y copiar `output/index.html` al directorio público de GitHub
-Pages, GitLab Pages, Netlify, Vercel o cualquier servidor estático. No se debe publicar ni
-ejecutar Python, `uv`, una base de datos o un backend. Para probar localmente:
+El directorio `output/` es generado y permanece excluido del repositorio mediante `.gitignore`.
+El workflow `.github/workflows/deploy-pages.yml` ejecuta automáticamente, ante cada `push` a
+`main`:
+
+1. instalación reproducible con `uv.lock` y Python 3.14;
+2. `pytest` y Ruff;
+3. generación completa mediante `uv run precipitaciones`;
+4. publicación de `output/` como artefacto de GitHub Pages.
+
+El despliegue también puede iniciarse manualmente desde **Actions → Publicar mapa en GitHub
+Pages → Run workflow**. El sitio resultante se publica en:
+
+```text
+https://marianof2000.github.io/precipitaciones-argentina-inta/
+```
+
+No hace falta subir los archivos generados ni mantener una rama `gh-pages`. Para probar el sitio
+localmente:
 
 ```bash
 uv run python -m http.server 8000 -d output
