@@ -72,7 +72,9 @@ def _period_key(period: str) -> tuple[int, int]:
     return int(year), int(quarter)
 
 
-def build_compact_temporal_payload(frame: pd.DataFrame) -> dict[str, object]:
+def build_compact_temporal_payload(
+    frame: pd.DataFrame, station_catalog: pd.DataFrame | None = None
+) -> dict[str, object]:
     """Deduplica metadatos de estaciones para reducir el HTML sin perder campos."""
     frame = ensure_quarterly_canonical_columns(frame)
     if "tipo_precipitacion" not in frame:
@@ -81,7 +83,15 @@ def build_compact_temporal_payload(frame: pd.DataFrame) -> dict[str, object]:
         "dataset_id", "archivo_origen", "fuente", "estacion", "localidad", "provincia",
         "latitud", "longitud", "unidad_original", "tipo_precipitacion",
     ]
-    stations = frame.drop_duplicates("dataset_id")[station_fields].reset_index(drop=True)
+    if station_catalog is None:
+        stations = frame.drop_duplicates("dataset_id")[station_fields].reset_index(drop=True)
+    else:
+        stations = station_catalog.copy()
+        stations["dataset_id"] = stations["id_estacion"]
+        stations["archivo_origen"] = "datos/estaciones.csv"
+        stations["unidad_original"] = "mm"
+        stations["tipo_precipitacion"] = "incremental"
+        stations = stations[station_fields].reset_index(drop=True)
     station_index = {dataset_id: index for index, dataset_id in enumerate(stations["dataset_id"])}
     station_records = [
         {
@@ -541,7 +551,7 @@ def _controls_html(maximum: float, audit: dict[str, object] | None = None) -> st
     if len(generated) == 10:
         year, month, day = generated.split("-")
         generated_label = f"{day}/{month}/{year}"
-    datasets = audit.get("datasets_procesados", "—")
+    source = audit.get("archivo_fuente", "datos/estaciones.csv")
     stations = audit.get("estaciones", "—")
     period_minimum = audit.get("periodo_minimo", "—")
     period_maximum = audit.get("periodo_maximo", "—")
@@ -589,7 +599,7 @@ def _controls_html(maximum: float, audit: dict[str, object] | None = None) -> st
       <small id="stats-basis">Sobre acumulados trimestrales por estación</small>
       <div id="stats-grid"></div></div>
     <div id="update-panel" class="precip-panel"><strong>Precipitaciones Argentina</strong><br>
-      Última actualización: {generated_label}<br>Datasets utilizados: {datasets} · Estaciones: {stations}<br>
+      Última actualización: {generated_label}<br>Fuente: {source} · Estaciones con datos: {stations}<br>
       Período disponible: {period_minimum} → {period_maximum}</div>
     <details id="analysis-panel" class="precip-panel"><summary><strong>Análisis avanzado</strong></summary>
       <label>Variable</label><select id="mode-select">
@@ -749,8 +759,8 @@ def _map_script(
           <small>Exclusivamente observaciones reales; no incluye IDW ni estaciones vecinas.</small></div>`;
       const [year,quarter] = period.split('-');
       const fields = [['Estación',station.e],['Localidad',station.l],
-        ['Provincia',station.p],['Fuente',station.f],['Dataset',station.d],
-        ['Archivo',station.a],['Año',year],['Trimestre',quarter],['Período',period],
+        ['Provincia',station.p],['Fuente',station.f],['ID estación',station.d],
+        ['Archivo de observaciones',station.a],['Año',year],['Trimestre',quarter],['Período',period],
         ['Latitud',station.y],['Longitud',station.x],['Tipo','Dato observado']];
       return '<b>Metadatos de la estación</b><table>' + fields.map(item => `<tr><td><b>${{escapeHtml(item[0])}}</b></td><td>${{escapeHtml(item[1])}}</td></tr>`).join('') + '</table>' + statistics;
     }}
@@ -780,8 +790,7 @@ def _map_script(
       values.sort((a,b)=>a-b); const mean=values.reduce((a,b)=>a+b,0)/(values.length||1);
       const median=values.length ? (values[Math.floor((values.length-1)/2)]+values[Math.ceil((values.length-1)/2)])/2 : NaN;
       const rows = [['Observaciones',visibleRows.reduce((sum,row)=>sum+row[3],0)],
-        ['Estaciones',new Set(visibleRows.map(row=>row[0])).size],
-        ['Datasets',new Set(visibleRows.map(row=>stationMetadata[row[0]].d)).size],
+        ['Estaciones',new Set(visibleRows.map(row=>stationMetadata[row[0]].d)).size],
         ['Fuentes',new Set(visibleRows.map(row=>stationMetadata[row[0]].f)).size],
         ['IDW',estimation && estimation.has_estimation ? `${{estimation.station_count}} estaciones activas · ${{estimation.location_count}} ubicaciones · estimación de red completa` : 'Sin datos suficientes'],
         ['Mínima',values.length ? `${{values[0].toFixed(1)}} ${{unitForMode()}}` : '—'],
@@ -817,9 +826,12 @@ def _map_script(
       [...new Set(stationMetadata.map(s=>s.p))].sort().forEach(value=>provinceFilter.add(new Option(value,value)));
       [...new Set(stationMetadata.map(s=>s.f))].sort().forEach(value=>sourceFilter.add(new Option(value,value)));
     }}
+    const stationsWithObservations=new Set();
+    Object.values(periodRows).forEach(rows=>rows.forEach(row=>stationsWithObservations.add(row[0])));
     function updateStations() {{
       const previous=stationSelect.value; stationSelect.innerHTML='';
-      stationMetadata.map((station,index)=>({{station,index}})).filter(item=>stationAllowed(item.station))
+      stationMetadata.map((station,index)=>({{station,index}}))
+        .filter(item=>stationsWithObservations.has(item.index) && stationAllowed(item.station))
         .sort((a,b)=>a.station.e.localeCompare(b.station.e,'es',{{sensitivity:'base'}}))
         .forEach(item=>stationSelect.add(new Option(item.station.e,item.index)));
       if([...stationSelect.options].some(option=>option.value===previous)) stationSelect.value=previous;
@@ -904,7 +916,7 @@ def _map_script(
     const requestedQuarter=query.get('quarter');
     if(requestedQuarter && [...comparisonQuarter.options].some(option=>option.value===requestedQuarter)) comparisonQuarter.value=requestedQuarter;
     if(query.get('advanced')==='1') document.getElementById('analysis-panel').open=true;
-    renderSeries();
+    renderSeries(); renderPeriod(Number(slider.value));
     """
 
 
@@ -913,6 +925,7 @@ def generate_map(
     provinces_path: Path = config.PROVINCES_GEOJSON,
     output_path: Path = config.OUTPUT_HTML,
     audit: dict[str, object] | None = None,
+    station_catalog: pd.DataFrame | None = None,
 ) -> Path:
     """Genera un HTML estático con datos meteorológicos y provinciales embebidos."""
     if frame.empty:
@@ -935,7 +948,7 @@ def generate_map(
     anomaly_maximum = float(frame["anomalia_absoluta_mm"].abs().max())
     if pd.isna(anomaly_maximum) or anomaly_maximum == 0:
         anomaly_maximum = 1.0
-    temporal_payload = build_compact_temporal_payload(frame)
+    temporal_payload = build_compact_temporal_payload(frame, station_catalog)
     territory = load_territory(provinces_path, config.TARGET_CRS)
     spatial_grid = create_spatial_grid(territory, config.GRID_RESOLUTION)
     interpolation_payload = build_interpolation_payload(
@@ -977,7 +990,10 @@ def generate_map(
         name="Precipitación interpolada (estimación IDW)", show=True
     ).add_to(map_object)
     coverage = folium.FeatureGroup(name="Cobertura espacial", show=False).add_to(map_object)
-    all_stations = frame.drop_duplicates(subset=["dataset_id"]).copy()
+    all_stations = (
+        frame.drop_duplicates(subset=["dataset_id"]).copy()
+        if station_catalog is None else station_catalog.copy()
+    )
     finite_coordinates = np.isfinite(all_stations["longitud"]) & np.isfinite(
         all_stations["latitud"]
     )

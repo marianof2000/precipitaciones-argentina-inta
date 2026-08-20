@@ -20,7 +20,7 @@ def test_year_quarter_and_period():
 
 def test_quarterly_sum():
     frame = pd.DataFrame({
-        "dataset_id": ["x", "x"], "archivo_origen": ["x.xls"] * 2,
+        "dataset_id": ["x", "x"], "archivo_origen": ["estaciones.csv"] * 2,
         "fuente": ["F"] * 2, "estacion": ["E"] * 2, "localidad": ["L"] * 2,
         "provincia": ["P"] * 2, "latitud": [-34] * 2, "longitud": [-58] * 2,
         "anio": [2024] * 2, "trimestre": ["T1"] * 2, "periodo": ["2024-T1"] * 2,
@@ -41,7 +41,7 @@ def test_quarterly_sum():
 
 def test_quarterly_rejects_non_accumulated_aggregation():
     frame = pd.DataFrame({
-        "dataset_id": ["x"], "archivo_origen": ["x.xls"], "fuente": ["F"],
+        "dataset_id": ["x"], "archivo_origen": ["estaciones.csv"], "fuente": ["F"],
         "estacion": ["E"], "localidad": ["L"], "provincia": ["P"],
         "latitud": [-34], "longitud": [-58], "anio": [2024],
         "trimestre": ["T1"], "periodo": ["2024-T1"], "unidad_original": ["mm"],
@@ -79,7 +79,7 @@ def test_station_quarter_statistics_distinguishes_missing_from_zero():
 def test_canonical_quarterly_value_is_shared_sum_not_mean():
     values = [0.0, 10.0, 20.0, 25.0, 30.0]
     frame = pd.DataFrame({
-        "dataset_id": ["x"] * 5, "archivo_origen": ["x.xls"] * 5,
+        "dataset_id": ["x"] * 5, "archivo_origen": ["estaciones.csv"] * 5,
         "fuente": ["F"] * 5, "estacion": ["Las Armas"] * 5,
         "localidad": ["L"] * 5, "provincia": ["P"] * 5,
         "latitud": [-37.0] * 5, "longitud": [-58.0] * 5,

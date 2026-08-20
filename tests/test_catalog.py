@@ -2,51 +2,30 @@ import json
 
 import pytest
 
-from precipitaciones_argentina.catalog import CatalogError, load_catalog
+from precipitaciones_argentina.catalog import CatalogError, load_csv_manifest, load_station_catalog
 
 
-def test_load_generic_catalog(tmp_path):
+def test_load_station_catalog(tmp_path):
     path = tmp_path / "estaciones.json"
-    path.write_text(json.dumps({"datasets": [{
-        "id": "x", "archivo": "x.xls", "fuente": "fuente", "estacion": "E",
-        "localidad": "L", "provincia": "P", "latitud": -34, "longitud": -58,
-        "campos": {"fecha": "Fecha", "precipitacion": "Lluvia"},
-    }]}))
-    assert load_catalog(path)[0].dataset_id == "x"
-    assert load_catalog(path)[0].tipo_precipitacion == "incremental"
+    payload = {"cantidad_estaciones": 1, "configuracion": {"fuente_nombre": "INTA"},
+        "estaciones": [{"id_estacion": "A1", "metadata_origen": {"nombre": "Estación",
+        "localidad": "Localidad", "provincia": "Provincia", "latitud": -34, "longitud": -58}}]}
+    path.write_text(json.dumps(payload))
+    frame = load_station_catalog(path)
+    assert frame.loc[0, "id_estacion"] == "A1"
+    assert frame.loc[0, "fuente"] == "INTA"
 
 
-def test_catalog_rejects_unknown_precipitation_semantics(tmp_path):
+def test_catalog_rejects_duplicate_ids(tmp_path):
+    station = {"id_estacion": "A1", "metadata_origen": {"latitud": -34, "longitud": -58}}
     path = tmp_path / "estaciones.json"
-    path.write_text(json.dumps({"datasets": [{
-        "id": "x", "archivo": "x.xls", "fuente": "F", "estacion": "E",
-        "latitud": -34, "longitud": -58, "tipo_precipitacion": "inferida",
-        "campos": {"fecha": "Fecha", "precipitacion": "Lluvia"},
-    }]}))
-    with pytest.raises(CatalogError, match="tipo_precipitacion"):
-        load_catalog(path)
+    path.write_text(json.dumps({"estaciones": [station, station]}))
+    with pytest.raises(CatalogError, match="duplicados"):
+        load_station_catalog(path)
 
 
-def test_inta_station_can_override_default_precipitation_type(tmp_path):
-    path = tmp_path / "estaciones.json"
-    path.write_text(json.dumps({
-        "configuracion": {
-            "tipo_precipitacion": "incremental",
-            "campos": {"fecha": "Fecha", "precipitacion": "Lluvia"},
-        },
-        "estaciones": [{
-            "id_estacion": "x", "tipo_precipitacion": "acumulada",
-            "metadata_origen": {
-                "nombre": "E", "latitud": -34, "longitud": -58,
-            },
-            "descarga": {"archivo": "x.xls"},
-        }],
-    }))
-    assert load_catalog(path)[0].tipo_precipitacion == "acumulada"
-
-
-def test_catalog_requires_explicit_fields(tmp_path):
-    path = tmp_path / "bad.json"
-    path.write_text(json.dumps({"datasets": [{"id": "x"}]}))
-    with pytest.raises(CatalogError):
-        load_catalog(path)
+def test_manifest_requires_structural_fields(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text("{}")
+    with pytest.raises(CatalogError, match="Faltan campos"):
+        load_csv_manifest(path)

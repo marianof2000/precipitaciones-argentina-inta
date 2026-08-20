@@ -4,7 +4,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "datos"
-STATIONS_FILE = DATA_DIR / "estaciones.json"
+STATION_CATALOG_FILE = DATA_DIR / "estaciones.json"
+OBSERVATIONS_CSV = DATA_DIR / "estaciones.csv"
+OBSERVATIONS_MANIFEST = DATA_DIR / "estaciones_csv.json"
+VERIFY_CSV_SHA256 = True
 ASSETS_DIR = PROJECT_ROOT / "assets"
 PROVINCES_GEOJSON = ASSETS_DIR / "argentina_provincias.geojson"
 OUTPUT_DIR = PROJECT_ROOT / "output"

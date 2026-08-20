@@ -1,53 +1,53 @@
-"""Carga controlada de libros Excel declarados en el catálogo."""
+"""Carga y verificación de las observaciones consolidadas en CSV."""
 
+from __future__ import annotations
+
+import hashlib
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-from .catalog import DatasetConfig
-
 
 class DatasetLoadError(RuntimeError):
-    """Error recuperable al cargar un dataset individual."""
+    """Indica que el CSV no puede utilizarse de forma segura."""
 
 
-def resolve_dataset_path(data_dir: Path, configured_path: str) -> Path:
-    """Resuelve rutas relativas al proyecto o al directorio datos."""
-    path = Path(configured_path)
-    if path.is_absolute():
-        return path
-    if path.parts and path.parts[0] == data_dir.name:
-        return data_dir.parent / path
-    return data_dir / path
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def read_excel_dataset(config: DatasetConfig, data_dir: Path) -> pd.DataFrame:
-    """Lee un XLS/XLSX y verifica hoja y columnas sin inferir nombres."""
-    path = resolve_dataset_path(data_dir, config.archivo)
+def read_observations_csv(
+    path: Path, manifest: dict[str, Any], *, verify_sha256: bool = True
+) -> pd.DataFrame:
+    """Lee el CSV y contrasta contenido y metadatos con su manifiesto."""
     if not path.is_file():
         raise DatasetLoadError(f"No se encontró {path}")
-    suffix = path.suffix.lower()
-    engines = {".xls": "xlrd", ".xlsx": "openpyxl"}
-    if suffix not in engines:
-        raise DatasetLoadError(f"Formato Excel no soportado: {path.name}")
+    actual_size = path.stat().st_size
+    expected_size = int(manifest["tamano_bytes"])
+    if actual_size != expected_size:
+        raise DatasetLoadError(f"Tamaño CSV inesperado: {actual_size}; manifiesto: {expected_size}")
+    if verify_sha256:
+        actual_hash = file_sha256(path)
+        expected_hash = str(manifest["sha256"]).lower()
+        if actual_hash != expected_hash:
+            raise DatasetLoadError(
+                f"SHA-256 CSV no coincide: {actual_hash}; manifiesto: {expected_hash}"
+            )
     try:
-        book = pd.ExcelFile(path, engine=engines[suffix])
-    except (OSError, ValueError) as exc:
-        raise DatasetLoadError(f"No se pudo abrir {path}: {exc}") from exc
-    sheet = config.hoja
-    if isinstance(sheet, str) and sheet not in book.sheet_names:
-        raise DatasetLoadError(f"Hoja inexistente '{sheet}' en {path.name}")
-    if isinstance(sheet, int) and not 0 <= sheet < len(book.sheet_names):
-        raise DatasetLoadError(f"Índice de hoja inexistente {sheet} en {path.name}")
-    try:
-        frame = pd.read_excel(book, sheet_name=sheet)
-    except (ValueError, TypeError) as exc:
-        raise DatasetLoadError(f"Error leyendo {path.name}: {exc}") from exc
-    required = set(config.campos.values())
-    missing = required.difference(frame.columns)
-    if missing:
-        raise DatasetLoadError(
-            f"Columnas inexistentes en {path.name}: {', '.join(sorted(missing))}"
-        )
+        frame = pd.read_csv(path, dtype={"id_estacion": "string"})
+    except (OSError, UnicodeError, pd.errors.ParserError) as exc:
+        raise DatasetLoadError(f"No se pudo leer {path}: {exc}") from exc
+    expected_columns = [str(value) for value in manifest["columnas"]]
+    if frame.columns.tolist() != expected_columns:
+        raise DatasetLoadError("Las columnas del CSV no coinciden con el manifiesto")
+    expected_rows = int(manifest["cantidad_registros"])
+    if len(frame) != expected_rows:
+        raise DatasetLoadError(f"Filas CSV inesperadas: {len(frame)}; manifiesto: {expected_rows}")
+    if len(frame.columns) != int(manifest["cantidad_columnas"]):
+        raise DatasetLoadError("La cantidad de columnas del CSV no coincide con el manifiesto")
     return frame
-

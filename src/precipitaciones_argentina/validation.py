@@ -20,6 +20,11 @@ class ProcessingSummary:
     duplicate_records: int = 0
     missing_values: int = 0
     dataset_errors: list[dict[str, str]] = field(default_factory=list)
+    source_file: str = ""
+    stations_catalog: int = 0
+    stations_observed: int = 0
+    unknown_station_ids: list[str] = field(default_factory=list)
+    manifest_differences: list[str] = field(default_factory=list)
 
 
 def valid_latitude(value: float) -> bool:

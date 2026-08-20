@@ -1,25 +1,29 @@
+import logging
+
 import pandas as pd
-import pytest
 
-from precipitaciones_argentina.catalog import DatasetConfig
-from precipitaciones_argentina.preprocessing import normalize_dataset, precipitation_to_mm
+from precipitaciones_argentina.preprocessing import normalize_observations
 
 
-@pytest.mark.parametrize(("unit", "expected"), [("mm", 2), ("cm", 20), ("in", 50.8)])
-def test_precipitation_conversion(unit, expected):
-    assert precipitation_to_mm(pd.Series([2]), unit).iloc[0] == expected
+def stations():
+    return pd.DataFrame({"id_estacion": ["A1"], "dataset_id": ["A1"], "estacion": ["E"],
+        "localidad": ["L"], "provincia": ["P"], "latitud": [-34.0],
+        "longitud": [-58.0], "fuente": ["INTA"]})
 
 
-def test_duplicate_detection_and_missing_not_zero():
-    raw = pd.DataFrame({
-        "Fecha": ["2024-01-01", "2024-01-01", "bad"], "Lluvia": [2, 3, None]
-    })
-    cfg = DatasetConfig(
-        "x", "x.xls", "F", "E", "L", "P", -34, -58, 0, "mm",
-        {"fecha": "Fecha", "precipitacion": "Lluvia"},
-    )
-    result, metrics = normalize_dataset(raw, cfg)
-    assert len(result) == 1
-    assert metrics["duplicates"] == 1
+def test_many_to_one_join_preserves_zero_and_discards_missing():
+    raw = pd.DataFrame({"id_estacion": ["A1", "A1"], "fecha": ["2024-01-01", "2024-01-02"],
+                        "precipitacion_pluviometrica": [0.0, None]})
+    result, metrics = normalize_observations(raw, stations())
+    assert result["precipitacion_mm"].tolist() == [0.0]
     assert metrics["missing"] == 1
 
+
+def test_unknown_station_is_warned_and_omitted(caplog):
+    raw = pd.DataFrame({"id_estacion": ["UNKNOWN"], "fecha": ["2024-01-01"],
+                        "precipitacion_pluviometrica": [2.0]})
+    with caplog.at_level(logging.WARNING):
+        result, metrics = normalize_observations(raw, stations())
+    assert result.empty
+    assert metrics["unknown_station_ids"] == ["UNKNOWN"]
+    assert "no están en el catálogo" in caplog.text

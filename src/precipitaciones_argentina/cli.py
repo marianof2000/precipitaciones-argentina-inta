@@ -1,4 +1,4 @@
-"""Orquestación de la Etapa 1 del pipeline."""
+"""Orquestación del pipeline CSV consolidado."""
 
 from __future__ import annotations
 
@@ -8,68 +8,50 @@ import pandas as pd
 
 from . import config
 from .audit import create_audit_report, write_audit_report
-from .catalog import load_catalog
+from .catalog import load_csv_manifest, load_station_catalog
 from .climate import evaluate_idw
-from .loaders import DatasetLoadError, read_excel_dataset
-from .preprocessing import NORMALIZED_COLUMNS, normalize_dataset
+from .loaders import read_observations_csv
+from .preprocessing import normalize_observations
 from .temporal import add_climate_anomalies, aggregate_quarterly
-from .validation import ProcessingSummary, valid_latitude, valid_longitude
+from .validation import ProcessingSummary
 from .visualization import generate_map
 
 LOGGER = logging.getLogger(__name__)
 
 
 def run_pipeline() -> tuple[pd.DataFrame, ProcessingSummary]:
-    """Procesa todos y sólo los datasets declarados y escribe el Parquet trimestral."""
-    LOGGER.info("Leyendo configuración: %s", config.STATIONS_FILE)
-    datasets = load_catalog(config.STATIONS_FILE)
-    summary = ProcessingSummary(datasets_declared=len(datasets))
-    normalized_frames: list[pd.DataFrame] = []
-    LOGGER.info("Datasets declarados: %d", len(datasets))
-
-    for position, dataset in enumerate(datasets, start=1):
-        LOGGER.info("[%d/%d] %s", position, len(datasets), dataset.archivo)
-        if not valid_latitude(dataset.latitud) or not valid_longitude(dataset.longitud):
-            LOGGER.error("%s: coordenadas configuradas inválidas", dataset.dataset_id)
-            summary.datasets_with_errors += 1
-            summary.dataset_errors.append(
-                {"dataset_id": dataset.dataset_id, "archivo": dataset.archivo,
-                 "error": "Coordenadas configuradas inválidas"}
-            )
-            continue
-        try:
-            raw = read_excel_dataset(dataset, config.DATA_DIR)
-            normalized, metrics = normalize_dataset(raw, dataset)
-        except (DatasetLoadError, ValueError, TypeError) as exc:
-            LOGGER.error("%s: %s", dataset.dataset_id, exc)
-            summary.datasets_with_errors += 1
-            summary.dataset_errors.append(
-                {"dataset_id": dataset.dataset_id, "archivo": dataset.archivo, "error": str(exc)}
-            )
-            continue
-        normalized_frames.append(normalized)
-        summary.datasets_processed += 1
-        summary.records_read += metrics["read"]
-        summary.valid_records += metrics["valid"]
-        summary.discarded_records += metrics["discarded"]
-        summary.duplicate_records += metrics["duplicates"]
-        summary.missing_values += metrics["missing"]
-        LOGGER.info(
-            "Registros leídos: %d; válidos: %d; descartados: %d",
-            metrics["read"], metrics["valid"], metrics["discarded"],
+    """Procesa el CSV único, lo cruza con el catálogo y escribe las salidas."""
+    LOGGER.info("Catálogo geográfico: %s", config.STATION_CATALOG_FILE)
+    stations = load_station_catalog(config.STATION_CATALOG_FILE)
+    manifest = load_csv_manifest(config.OBSERVATIONS_MANIFEST)
+    raw = read_observations_csv(
+        config.OBSERVATIONS_CSV, manifest, verify_sha256=config.VERIFY_CSV_SHA256
+    )
+    daily, metrics = normalize_observations(
+        raw, stations, source_file=str(config.OBSERVATIONS_CSV.relative_to(config.PROJECT_ROOT))
+    )
+    differences = list(manifest.get("diferencias_estructurales", []))
+    manifest_catalog = manifest.get("cantidad_estaciones_catalogo")
+    if manifest_catalog is not None and int(manifest_catalog) != len(stations):
+        differences.append(
+            f"Manifiesto declara {manifest_catalog} estaciones; "
+            f"catálogo actual contiene {len(stations)}"
         )
-
-    if normalized_frames:
-        daily = pd.concat(normalized_frames, ignore_index=True)
-        quarterly = aggregate_quarterly(daily, config.AGGREGATION_METHOD)
-        quarterly = add_climate_anomalies(
-            quarterly,
-            start_year=config.CLIMATOLOGY_START_YEAR,
-            end_year=config.CLIMATOLOGY_END_YEAR,
-            minimum_years=config.MIN_HISTORICAL_YEARS,
-        )
-    else:
-        quarterly = pd.DataFrame(columns=[*NORMALIZED_COLUMNS, "cantidad_observaciones"])
+    summary = ProcessingSummary(
+        datasets_declared=1, datasets_processed=1, records_read=int(metrics["read"]),
+        valid_records=int(metrics["valid"]), discarded_records=int(metrics["discarded"]),
+        duplicate_records=int(metrics["duplicates"]), missing_values=int(metrics["missing"]),
+        source_file=str(config.OBSERVATIONS_CSV.relative_to(config.PROJECT_ROOT)),
+        stations_catalog=len(stations), stations_observed=int(daily["id_estacion"].nunique()),
+        unknown_station_ids=list(metrics["unknown_station_ids"]), manifest_differences=differences,
+    )
+    for difference in differences:
+        LOGGER.warning("Diferencia de manifiesto: %s", difference)
+    quarterly = aggregate_quarterly(daily, config.AGGREGATION_METHOD)
+    quarterly = add_climate_anomalies(
+        quarterly, start_year=config.CLIMATOLOGY_START_YEAR,
+        end_year=config.CLIMATOLOGY_END_YEAR, minimum_years=config.MIN_HISTORICAL_YEARS,
+    )
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     quarterly.to_parquet(config.OUTPUT_PARQUET, index=False)
     LOGGER.info("Parquet generado correctamente: %s", config.OUTPUT_PARQUET)
@@ -81,7 +63,7 @@ def run_pipeline() -> tuple[pd.DataFrame, ProcessingSummary]:
         }
         LOGGER.info("Auditoría generada correctamente: %s", config.OUTPUT_AUDIT)
         LOGGER.info("Generando mapa temporal...")
-        html_path = generate_map(quarterly, audit=audit)
+        html_path = generate_map(quarterly, audit=audit, station_catalog=stations)
         audit["tamano_html_bytes"] = html_path.stat().st_size
         audit["tamano_html_mb"] = round(html_path.stat().st_size / 1024**2, 3)
         write_audit_report(audit)
@@ -95,7 +77,7 @@ def run_pipeline() -> tuple[pd.DataFrame, ProcessingSummary]:
 
 def _log_summary(summary: ProcessingSummary) -> None:
     LOGGER.info(
-        "Resumen — declarados: %d; procesados: %d; con errores: %d; "
+        "Resumen — fuentes declaradas: %d; procesadas: %d; con errores: %d; "
         "leídos: %d; válidos: %d; descartados: %d; duplicados: %d; faltantes: %d",
         summary.datasets_declared, summary.datasets_processed, summary.datasets_with_errors,
         summary.records_read, summary.valid_records, summary.discarded_records,

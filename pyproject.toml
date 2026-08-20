@@ -8,12 +8,10 @@ dependencies = [
     "folium>=0.20",
     "geopandas>=1.1",
     "numpy>=2.3",
-    "openpyxl>=3.1",
     "pandas>=2.3",
     "pillow>=11.3",
     "pyarrow>=21",
     "scipy>=1.16",
-    "xlrd>=2.0",
 ]
 
 [project.scripts]

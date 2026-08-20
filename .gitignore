@@ -14,3 +14,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 output/
+
+# Fuentes operativas consolidadas: no volver a incorporar planillas individuales
+datos/*.xls

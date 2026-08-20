@@ -1,4 +1,4 @@
-"""Normalización de observaciones heterogéneas."""
+"""Normalización de observaciones y unión con el catálogo geográfico."""
 
 from __future__ import annotations
 
@@ -6,67 +6,60 @@ import logging
 
 import pandas as pd
 
-from .catalog import DatasetConfig
-from .validation import SUPPORTED_UNITS, invalid_observation_mask
-
 LOGGER = logging.getLogger(__name__)
+REQUIRED_OBSERVATION_COLUMNS = {"id_estacion", "fecha", "precipitacion_pluviometrica"}
 NORMALIZED_COLUMNS = [
-    "dataset_id", "archivo_origen", "fuente", "estacion", "localidad", "provincia",
-    "latitud", "longitud", "fecha", "anio", "trimestre", "periodo",
-    "precipitacion_original", "unidad_original", "tipo_precipitacion",
-    "precipitacion_mm",
+    "id_estacion", "dataset_id", "archivo_origen", "fuente", "estacion", "localidad",
+    "provincia", "latitud", "longitud", "fecha", "anio", "trimestre", "periodo",
+    "precipitacion_original", "unidad_original", "tipo_precipitacion", "precipitacion_mm",
 ]
 
 
-def precipitation_to_mm(values: pd.Series, unit: str) -> pd.Series:
-    """Convierte precipitación a milímetros conservando faltantes."""
-    normalized_unit = unit.strip().lower()
-    factors = {"mm": 1.0, "cm": 10.0, "in": 25.4}
-    if normalized_unit not in SUPPORTED_UNITS:
-        raise ValueError(f"Unidad de precipitación desconocida: {unit}")
-    return pd.to_numeric(values, errors="coerce") * factors[normalized_unit]
-
-
-def normalize_dataset(
-    raw: pd.DataFrame, config: DatasetConfig
-) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Mapea un dataset al modelo común y descarta registros inválidos trazablemente."""
-    date_column = config.campos["fecha"]
-    precipitation_column = config.campos["precipitacion"]
-    original = pd.to_numeric(raw[precipitation_column], errors="coerce")
-    frame = pd.DataFrame(
-        {
-            "dataset_id": config.dataset_id,
-            "archivo_origen": config.archivo,
-            "fuente": config.fuente,
-            "estacion": config.estacion,
-            "localidad": config.localidad,
-            "provincia": config.provincia,
-            "latitud": config.latitud,
-            "longitud": config.longitud,
-            "fecha": pd.to_datetime(raw[date_column], errors="coerce"),
-            "precipitacion_original": original,
-            "unidad_original": config.unidad_precipitacion,
-            "tipo_precipitacion": config.tipo_precipitacion,
-            "precipitacion_mm": precipitation_to_mm(original, config.unidad_precipitacion),
-        }
+def normalize_observations(
+    raw: pd.DataFrame, stations: pd.DataFrame, *, source_file: str = "datos/estaciones.csv"
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Normaliza el CSV y hace un join many-to-one exclusivamente por ``id_estacion``."""
+    missing_columns = sorted(REQUIRED_OBSERVATION_COLUMNS.difference(raw.columns))
+    if missing_columns:
+        raise ValueError(f"Faltan columnas requeridas: {', '.join(missing_columns)}")
+    observations = raw[["id_estacion", "fecha", "precipitacion_pluviometrica"]].copy()
+    observations["id_estacion"] = observations["id_estacion"].astype("string").str.strip()
+    observations["fecha"] = pd.to_datetime(observations["fecha"], errors="coerce")
+    observations["precipitacion_original"] = pd.to_numeric(
+        observations.pop("precipitacion_pluviometrica"), errors="coerce"
     )
-    missing = int(frame[["fecha", "precipitacion_original"]].isna().any(axis=1).sum())
-    duplicates = frame.duplicated(subset=["dataset_id", "fecha"], keep="first")
-    invalid = invalid_observation_mask(frame)
-    negative = int(frame["precipitacion_mm"].lt(0).sum())
-    if negative:
-        LOGGER.warning("%s: %d precipitaciones negativas", config.dataset_id, negative)
-    valid = frame.loc[~invalid & ~duplicates].copy()
+    catalog_ids = set(stations["id_estacion"].astype(str))
+    unknown_ids = sorted(set(observations["id_estacion"].dropna().astype(str)) - catalog_ids)
+    if unknown_ids:
+        LOGGER.warning(
+            "%d estaciones del CSV no están en el catálogo y serán omitidas: %s",
+            len(unknown_ids), ", ".join(unknown_ids),
+        )
+    frame = observations.merge(
+        stations, on="id_estacion", how="left", validate="many_to_one", indicator=True
+    )
+    unmatched_rows = int(frame["_merge"].ne("both").sum())
+    frame = frame.loc[frame["_merge"].eq("both")].drop(columns="_merge")
+    frame["dataset_id"] = frame["id_estacion"]
+    frame["archivo_origen"] = source_file
+    frame["unidad_original"] = "mm"
+    frame["tipo_precipitacion"] = "incremental"
+    frame["precipitacion_mm"] = frame["precipitacion_original"]
+    duplicates = frame.duplicated(subset=["id_estacion", "fecha"], keep="first")
+    missing = frame[["fecha", "precipitacion_original"]].isna().any(axis=1)
+    negative = frame["precipitacion_mm"].lt(0)
+    invalid_coordinates = ~frame["latitud"].between(-90, 90) | ~frame["longitud"].between(-180, 180)
+    invalid = missing | negative | invalid_coordinates | duplicates
+    if negative.any():
+        LOGGER.warning("Se omitieron %d precipitaciones negativas", int(negative.sum()))
+    valid = frame.loc[~invalid].copy()
     valid["anio"] = valid["fecha"].dt.year.astype("int32")
-    valid["trimestre"] = (valid["fecha"].dt.quarter).map(lambda value: f"T{value}")
-    valid["periodo"] = valid["anio"].astype("string").str.cat(
-        valid["trimestre"].astype("string"), sep="-"
-    )
-    return valid[NORMALIZED_COLUMNS], {
-        "read": len(frame),
-        "valid": len(valid),
-        "discarded": int((invalid | duplicates).sum()),
-        "duplicates": int(duplicates.sum()),
-        "missing": missing,
+    valid["trimestre"] = "T" + valid["fecha"].dt.quarter.astype(str)
+    valid["periodo"] = valid["anio"].astype("string") + "-" + valid["trimestre"]
+    metrics: dict[str, object] = {
+        "read": len(raw), "valid": len(valid), "discarded": int(invalid.sum()) + unmatched_rows,
+        "duplicates": int(duplicates.sum()), "missing": int(missing.sum()),
+        "negative": int(negative.sum()), "unknown_station_ids": unknown_ids,
+        "unmatched_rows": unmatched_rows,
     }
+    return valid[NORMALIZED_COLUMNS], metrics

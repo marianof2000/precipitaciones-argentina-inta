@@ -21,7 +21,7 @@ from precipitaciones_argentina.visualization import (
 
 def sample_frame():
     return pd.DataFrame({
-        "dataset_id": ["a", "a"], "archivo_origen": ["a.xls", "a.xls"],
+        "dataset_id": ["a", "a"], "archivo_origen": ["estaciones.csv", "estaciones.csv"],
         "fuente": ["F", "F"], "estacion": ["E", "E"], "localidad": ["L", "L"],
         "provincia": ["P", "P"], "latitud": [-34.0, -34.0],
         "longitud": [-58.0, -58.0], "anio": [2023, 2024],

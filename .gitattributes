@@ -1,0 +1,1 @@
+datos/estaciones.csv filter=lfs diff=lfs merge=lfs -text

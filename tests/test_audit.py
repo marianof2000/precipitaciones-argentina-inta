@@ -5,7 +5,7 @@ from precipitaciones_argentina.audit import build_traceability_samples
 
 def test_traceability_sample_matches_quarterly_value():
     daily = pd.DataFrame({
-        "dataset_id": ["a", "a"], "archivo_origen": ["datos/a.xls"] * 2,
+        "dataset_id": ["a", "a"], "archivo_origen": ["datos/estaciones.csv"] * 2,
         "fuente": ["F"] * 2, "estacion": ["E"] * 2, "localidad": ["L"] * 2,
         "provincia": ["P"] * 2, "latitud": [-34.0] * 2, "longitud": [-58.0] * 2,
         "fecha": pd.to_datetime(["2024-01-01", "2024-02-01"]), "anio": [2024] * 2,

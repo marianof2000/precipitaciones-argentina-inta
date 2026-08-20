@@ -83,6 +83,8 @@ def annual_quarter_values(
 
 def aggregate_quarterly(frame: pd.DataFrame, method: str = "sum") -> pd.DataFrame:
     """Agrega por dataset y trimestre; la suma exige al menos una observación."""
+    if "id_estacion" not in frame:
+        frame = frame.assign(id_estacion=frame["dataset_id"])
     if "tipo_precipitacion" not in frame:
         frame = frame.assign(tipo_precipitacion="incremental")
     if method != "sum":
@@ -96,7 +98,8 @@ def aggregate_quarterly(frame: pd.DataFrame, method: str = "sum") -> pd.DataFram
             "de intervalos; no se sumarán automáticamente"
         )
     keys = [
-        "dataset_id", "archivo_origen", "fuente", "estacion", "localidad", "provincia",
+        "id_estacion", "dataset_id", "archivo_origen", "fuente", "estacion", "localidad",
+        "provincia",
         "latitud", "longitud", "anio", "trimestre", "periodo", "unidad_original",
         "tipo_precipitacion",
     ]

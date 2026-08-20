@@ -7,9 +7,9 @@ por etapas, construir un mapa geoespacial y temporal publicable como sitio está
 
 ## Arquitectura y dependencias
 
-El paquete `src/precipitaciones_argentina` separa catálogo, loaders, validación, normalización,
-tiempo, estadísticas, geometría, cobertura, auditoría, visualización y CLI. `pandas`, `xlrd` y
-`openpyxl` leen Excel; `pyarrow` genera Parquet; NumPy/SciPy implementan IDW; GeoPandas/Shapely
+El paquete `src/precipitaciones_argentina` separa catálogo, carga, validación, normalización,
+tiempo, estadísticas, geometría, cobertura, auditoría, visualización y CLI. `pandas` lee el CSV
+consolidado; `pyarrow` genera Parquet; NumPy/SciPy implementan IDW; GeoPandas/Shapely
 procesan geometrías; Pillow codifica los rásteres; Folium/Leaflet construyen el mapa. `pytest` y
 Ruff son dependencias de desarrollo. Todas se resuelven exclusivamente mediante `uv.lock`.
 
@@ -25,32 +25,26 @@ No se usa `requirements.txt`.
 
 ## Datos y catálogo
 
-Los Excel originales permanecen sin modificaciones en `datos/`. Sólo se procesan los archivos
-declarados en `datos/estaciones.json`; el programa nunca descubre XLS indiscriminadamente.
+El pipeline usa tres archivos con responsabilidades distintas:
 
-El catálogo actual conserva los metadatos originales de INTA. Su sección `configuracion` define
-la fuente, hoja, unidad y mapeo explícito de columnas compartido. Cada elemento de `estaciones`
-declara `id_estacion`, `metadata_origen` (nombre, localidad, provincia, latitud y longitud) y
-`descarga.archivo`. También se admite el formato extensible `datasets`, donde cada entrada puede
-declarar `id`, `archivo`, `fuente`, `estacion`, `localidad`, `provincia`, coordenadas, `hoja`,
-`unidad_precipitacion`, `campos` y metadatos adicionales.
+- `datos/estaciones.csv`: única fuente operativa de observaciones. Requiere al menos
+  `id_estacion`, `fecha` y `precipitacion_pluviometrica`.
+- `datos/estaciones.json`: catálogo maestro de identificadores, nombres, ubicación, coordenadas y
+  fuente.
+- `datos/estaciones_csv.json`: manifiesto del consolidado. Declara filas, columnas, tamaño y
+  SHA-256, además de diferencias y errores producidos durante su construcción.
 
-Para incorporar una estación estándar:
-
-1. Copiar el `.xls` o `.xlsx` sin renombrarlo a `datos/`.
-2. Declarar exactamente ese archivo en el catálogo.
-3. Declarar hoja, unidad, columnas y metadatos; no es necesario modificar Python.
-
-Los XLS actuales usan la hoja `Datos diarios`, la columna `Fecha` y
-`Precipitacion_Pluviometrica`; estos nombres no se infieren, sino que están declarados en el
-catálogo. Un dataset con otra estructura debe declarar sus propios `campos` y `hoja`.
+La verificación SHA-256 está activa por defecto mediante `VERIFY_CSV_SHA256 = True`. Una
+diferencia de hash, tamaño, filas o columnas detiene el procesamiento. Las estaciones se unen
+exclusivamente por `id_estacion` con cardinalidad many-to-one; IDs sin catálogo se advierten y se
+omiten. No se conservan ni procesan archivos XLS individuales.
 
 ## Procesamiento
 
-La Etapa 1 lee y valida el catálogo, comprueba archivo/hoja/columnas, normaliza fechas,
-coordenadas y unidades, descarta explícitamente registros inválidos o duplicados, y agrega por
-estación y trimestre. El modelo conserva dataset, archivo, fuente, estación, ubicación, fecha,
-año, trimestre, período, valor/unidad original y milímetros.
+La Etapa 1 valida el catálogo, el manifiesto y el CSV; normaliza fechas y precipitación, descarta
+explícitamente registros inválidos o duplicados, y agrega por estación y trimestre. Calcula
+acumulado, promedio, mínimo, máximo y cantidad de observaciones válidas. Los faltantes se
+conservan como faltantes y nunca se confunden con precipitación cero.
 
 Los trimestres son T1 (enero-marzo), T2 (abril-junio), T3 (julio-septiembre) y T4
 (octubre-diciembre). La variable científica publicada es precipitación acumulada y, por ello,
@@ -91,10 +85,10 @@ visualizarse.
 
 ## Estadísticas y auditoría
 
-El panel trimestral muestra observaciones originales incluidas, estaciones, datasets, fuentes,
+El panel trimestral muestra observaciones originales incluidas, estaciones y fuentes,
 mínimo, máximo, media y mediana. Cada ejecución genera `output/auditoria.json` con fecha de
 generación, resultados por dataset, descartes, duplicados, faltantes, cobertura temporal,
-estadísticos, escala global, estaciones fuera del territorio y muestras trazables desde el XLS
+estadísticos, escala global, estaciones fuera del territorio y muestras trazables desde el CSV
 hasta el acumulado publicado. El Parquet conserva precisión completa para revisión independiente.
 
 ## Rendimiento y controles
@@ -184,7 +178,7 @@ límites e interpolaciones están embebidos. Requieren Internet las bibliotecas 
 - **Cobertura:** la distribución espacial de estaciones es heterogénea.
 - **Distancia:** la incertidumbre aumenta al alejarse de las observaciones.
 - **Datos faltantes:** ausencia de dato no equivale a precipitación cero.
-- **Calidad:** el resultado depende de la calidad y continuidad de los XLS originales.
+- **Calidad:** el resultado depende de la calidad y continuidad del CSV consolidado.
 - **Escala temporal:** los acumulados usan obligatoriamente agregación trimestral `sum`.
 
 ## Checklist de versión 1.0.0
@@ -192,5 +186,5 @@ límites e interpolaciones están embebidos. Requieren Internet las bibliotecas 
 - [x] `uv sync --frozen`, pytest y Ruff funcionan.
 - [x] Catálogo, Parquet, auditoría, mapa, escala, IDW, cobertura y estadísticas validados.
 - [x] HTML preparado para archivo local y servidor HTTP estático.
-- [x] Todos los XLS declarados están disponibles y se procesan.
-- [x] Auditoría sin datasets omitidos ni errores de carga.
+- [x] El pipeline usa únicamente el CSV consolidado y los dos catálogos JSON.
+- [x] CSV, manifiesto, SHA-256, catálogo y unión por `id_estacion` validados.
