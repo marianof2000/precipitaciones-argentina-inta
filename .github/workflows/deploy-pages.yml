@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v6
+        with:
+          lfs: true
 
       - name: Instalar uv
         uses: astral-sh/setup-uv@v9.0.0
