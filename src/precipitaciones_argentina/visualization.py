@@ -687,9 +687,10 @@ def _map_script(
     const requestedScale = query.get('scale');
     if (['linear','log'].includes(requestedScale)) colorScaleSelect.value=requestedScale;
     if (query.get('opaque')==='1') idwOpaqueCheckbox.checked=true;
+    const hasFocus=query.has('lat') && query.has('lon');
     const focusLat=Number(query.get('lat')), focusLon=Number(query.get('lon'));
-    const focusZoom=Number(query.get('zoom'));
-    if(Number.isFinite(focusLat) && Number.isFinite(focusLon))
+    const focusZoom=query.has('zoom') ? Number(query.get('zoom')) : 8;
+    if(hasFocus && Number.isFinite(focusLat) && Number.isFinite(focusLon))
       {map_name}.setView([focusLat,focusLon],Number.isFinite(focusZoom) ? focusZoom : 8);
     slider.max = Math.max(0, periods.length - 1);
     slider.value = Math.max(0, periods.length - 1);

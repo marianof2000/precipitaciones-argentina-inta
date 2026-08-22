@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import box
 
+from precipitaciones_argentina import config
 from precipitaciones_argentina.spatial import create_spatial_grid
 from precipitaciones_argentina.visualization import (
     anomaly_rgba,
@@ -184,3 +185,6 @@ def test_generate_static_map(tmp_path):
     assert "estimation.images[colorScaleSelect.value]" in html
     assert "interpolationOverlay.setOpacity" in html
     assert "const idwDefaultOpacity = 0.45" in html
+    assert "const hasFocus=query.has('lat') && query.has('lon')" in html
+    assert "if(hasFocus && Number.isFinite(focusLat)" in html
+    assert f"center: [{config.ARGENTINA_CENTER[0]}, {config.ARGENTINA_CENTER[1]}]" in html
